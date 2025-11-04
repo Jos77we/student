@@ -10,7 +10,6 @@ const {
   WEBHOOK_URL = ''
 } = process.env;
 
-console.log(TELEGRAM_TOKEN)
 if (!TELEGRAM_TOKEN) {
   console.warn('Warning: TELEGRAM_TOKEN is not set. Bot will not work until provided.');
 }
