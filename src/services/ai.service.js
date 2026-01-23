@@ -4,36 +4,80 @@ import { logger } from '../utils/logger.js';
 import { Material } from '../models/material.model.js';
 import { buildStudyPrompt, buildPurchasePrompt } from './prompt.service.js';
 
-/**
- * Smart search that breaks down query and searches word-by-word across all fields
- */
-async function findRelevantMaterials(userQuery, limit = 10) {
-  try {
-    // Extract all meaningful words and phrases from the query
-    const searchTokens = extractSearchTokens(userQuery);
-    
-    logger.info(`Search tokens extracted:`, { searchTokens });
+// NCLEX Categories for structured selection
+const NCLEX_CATEGORIES = {
+  'Safe and Effective Care Environment': [
+    'patient safety', 'infection control', 'legal responsibilities', 'ethics',
+    'delegation', 'prioritization', 'management of care', 'emergency preparedness',
+    'HIPAA', 'patient rights', 'confidentiality'
+  ],
+  'Health Promotion and Maintenance': [
+    'growth and development', 'prenatal care', 'postnatal care',
+    'health screening', 'immunizations', 'lifestyle modification',
+    'health education', 'disease prevention'
+  ],
+  'Psychosocial Integrity': [
+    'mental health', 'depression', 'anxiety', 'schizophrenia',
+    'crisis intervention', 'substance abuse', 'therapeutic communication',
+    'coping mechanisms', 'stress management', 'abuse', 'neglect', 'grief'
+  ],
+  'Physiological Integrity': [
+    'medical-surgical nursing', 'pharmacology', 'drug actions',
+    'side effects', 'IV therapy', 'fluids', 'oxygenation',
+    'respiratory care', 'cardiac disorders', 'renal disorders',
+    'neurological disorders', 'endocrine disorders',
+    'fluid and electrolyte balance', 'acute illness',
+    'chronic illness management', 'wound care'
+  ]
+};
 
-    if (searchTokens.length === 0) {
-      return await getFallbackMaterials(limit);
+// Generate 6-digit promo code
+function generatePromoCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// NCLEX-specific search that prioritizes categories
+async function findNCLEXMaterials(userQuery, category = null, limit = 10) {
+  try {
+    // If user confirms /buy, show categories first
+    if (userQuery.toLowerCase().includes('/buy') && !category) {
+      return { type: 'category_selection', categories: Object.keys(NCLEX_CATEGORIES) };
     }
 
-    // Build an elaborate OR query searching each token across all fields
+    // Extract search tokens
+    const searchTokens = extractNCLEXSearchTokens(userQuery, category);
+    
+    logger.info(`NCLEX search tokens:`, { searchTokens, category });
+
+    if (searchTokens.length === 0) {
+      return await getNCLEXFallbackMaterials(category, limit);
+    }
+
+    // Build search query with category priority
     const searchConditions = searchTokens.flatMap(token => [
       { title: { $regex: token, $options: 'i' } },
       { topic: { $regex: token, $options: 'i' } },
       { description: { $regex: token, $options: 'i' } },
-      { level: { $regex: token, $options: 'i' } },
+      { examType: { $regex: token, $options: 'i' } },
+      { nclexCategory: { $regex: token, $options: 'i' } },
       { keywords: { $in: [new RegExp(token, 'i')] } }
     ]);
 
-    const query = { $or: searchConditions };
+    // Add category filter if specified
+    const query = category 
+      ? { 
+          $and: [
+            { nclexCategory: { $regex: category, $options: 'i' } },
+            { $or: searchConditions }
+          ]
+        }
+      : { $or: searchConditions };
 
-    logger.info(`Searching with query:`, JSON.stringify(query, null, 2));
+    logger.info(`NCLEX search query:`, JSON.stringify(query, null, 2));
 
     // Execute search
     let results = await Material.find(query)
-      .limit(limit * 2) // Get more initially for scoring
+      .limit(limit * 2)
       .lean();
 
     // If no results, try partial matching
@@ -42,37 +86,44 @@ async function findRelevantMaterials(userQuery, limit = 10) {
       const partialConditions = searchTokens.flatMap(token => [
         { title: { $regex: `.*${token}.*`, $options: 'i' } },
         { topic: { $regex: `.*${token}.*`, $options: 'i' } },
-        { description: { $regex: `.*${token}.*`, $options: 'i' } }
+        { description: { $regex: `.*${token}.*`, $options: 'i' } },
+        { nclexCategory: { $regex: `.*${token}.*`, $options: 'i' } }
       ]);
 
-      const partialQuery = { $or: partialConditions };
+      const partialQuery = category 
+        ? { 
+            $and: [
+              { nclexCategory: { $regex: category, $options: 'i' } },
+              { $or: partialConditions }
+            ]
+          }
+        : { $or: partialConditions };
+      
       results = await Material.find(partialQuery)
         .limit(limit * 2)
         .lean();
     }
 
-    // Score and rank results based on token matches
-    const scoredResults = scoreMaterialRelevance(results, searchTokens);
+    // Score results with NCLEX-specific weighting
+    const scoredResults = scoreNCLEXRelevance(results, searchTokens, category);
     
     // Return top results
     const finalResults = scoredResults.slice(0, limit);
     
-    logger.info(`Found ${finalResults.length} relevant materials out of ${results.length} total`);
-    return finalResults;
+    logger.info(`Found ${finalResults.length} NCLEX materials`);
+    return { type: 'materials', data: finalResults };
 
   } catch (err) {
-    logger.error('Error in smart material search:', err);
-    return await getFallbackMaterials(limit);
+    logger.error('Error in NCLEX material search:', err);
+    return await getNCLEXFallbackMaterials(category, limit);
   }
 }
 
-/**
- * Extract all meaningful search tokens from user query
- */
-function extractSearchTokens(userQuery) {
+// Extract NCLEX-specific search tokens
+function extractNCLEXSearchTokens(userQuery, category = null) {
   const query = userQuery.toLowerCase().trim();
   
-  // Remove common stop words but keep nursing/education relevant words
+  // NCLEX-specific stop words
   const stopWords = [
     'i', 'me', 'my', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 
     'to', 'for', 'of', 'with', 'by', 'as', 'is', 'are', 'was', 'were', 'be',
@@ -81,138 +132,109 @@ function extractSearchTokens(userQuery) {
     'these', 'those', 'am', 'looking', 'for', 'with', 'topics', 'in', 'currently',
     'at', 'want', 'need', 'like', 'about', 'some', 'any', 'help', 'study', 'learn',
     'please', 'could', 'would', 'should', 'material', 'materials', 'exam', 'exams',
-    'paper', 'papers', 'test', 'tests', 'preparing', 'studying'
+    'paper', 'papers', 'test', 'tests', 'preparing', 'studying', 'buy', 'purchase',
+    'nclex', 'rn', 'pn'
   ];
 
-  // First, extract multi-word phrases (exam names, topics)
-  const phrases = extractPhrases(query);
-  
-  // Then extract individual meaningful words
+  // Extract NCLEX exam types
+  const examPatterns = [
+    /nclex[\s-]*rn/gi,
+    /nclex[\s-]*pn/gi,
+    /nclex[\s-]*exam/gi,
+    /national council.*exam/gi,
+    /nursing board exam/gi
+  ];
+
+  // Extract category-specific phrases
+  const categoryPhrases = [];
+  if (category) {
+    const categoryKeywords = NCLEX_CATEGORIES[category] || [];
+    categoryKeywords.forEach(keyword => {
+      const pattern = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      const matches = query.match(pattern);
+      if (matches) {
+        categoryPhrases.push(...matches.map(m => m.toLowerCase().trim()));
+      }
+    });
+  }
+
+  // Check for exam patterns
+  const examPhrases = [];
+  examPatterns.forEach(pattern => {
+    const matches = query.match(pattern);
+    if (matches) {
+      examPhrases.push(...matches.map(m => m.toLowerCase().trim()));
+    }
+  });
+
+  // Extract individual meaningful words
   const words = query
     .split(/[\s\.,!?;:]+/)
     .filter(word => word.length > 2)
     .filter(word => !stopWords.includes(word))
-    .filter(word => !phrases.some(phrase => phrase.includes(word))); // Avoid duplicates
+    .filter(word => ![...examPhrases, ...categoryPhrases].some(phrase => 
+      phrase.includes(word) || word.includes(phrase)));
 
-  // Combine phrases and words, remove duplicates
-  const allTokens = [...phrases, ...words];
+  // Combine all tokens
+  const allTokens = [...examPhrases, ...categoryPhrases, ...words];
   const uniqueTokens = [...new Set(allTokens)];
 
-  logger.info(`Extracted tokens:`, { phrases, words, uniqueTokens });
+  logger.info(`Extracted NCLEX tokens:`, { examPhrases, categoryPhrases, words, uniqueTokens });
   
   return uniqueTokens;
 }
 
-/**
- * Extract meaningful phrases from query
- */
-function extractPhrases(query) {
-  const phrases = [];
-  
-  // Common nursing exam patterns
-  const examPatterns = [
-    /hesi admission assessment exam/gi,
-    /hesi admission exam/gi,
-    /hesi assessment/gi,
-    /hesi exam/gi,
-    /nclex exam/gi,
-    /nursing entrance exam/gi,
-    /admission assessment/gi,
-    /pre-health sciences/gi,
-    /pre health sciences/gi
-  ];
-
-  // Common topic patterns
-  const topicPatterns = [
-    /mathematics|math/gi,
-    /anatomy physiology/gi,
-    /medical surgical/gi,
-    /patient care/gi,
-    /nursing fundamentals/gi,
-    /pharmacology drugs/gi,
-    /cardiac care/gi,
-    /pediatric nursing/gi
-  ];
-
-  // Level patterns
-  const levelPatterns = [
-    /entry level/gi,
-    /entry-level/gi,
-    /med surg/gi,
-    /medical surgical/gi,
-    /fundamentals level/gi,
-    /advanced level/gi
-  ];
-
-  // Check for exam patterns
-  examPatterns.forEach(pattern => {
-    const matches = query.match(pattern);
-    if (matches) {
-      phrases.push(...matches.map(m => m.toLowerCase().trim()));
-    }
-  });
-
-  // Check for topic patterns
-  topicPatterns.forEach(pattern => {
-    const matches = query.match(pattern);
-    if (matches) {
-      phrases.push(...matches.map(m => m.toLowerCase().trim()));
-    }
-  });
-
-  // Check for level patterns
-  levelPatterns.forEach(pattern => {
-    const matches = query.match(pattern);
-    if (matches) {
-      phrases.push(...matches.map(m => m.toLowerCase().trim()));
-    }
-  });
-
-  return [...new Set(phrases)];
-}
-
-/**
- * Score materials based on token matches across all fields
- */
-function scoreMaterialRelevance(materials, searchTokens) {
+// Score materials with NCLEX-specific weighting
+function scoreNCLEXRelevance(materials, searchTokens, category = null) {
   return materials.map(material => {
     let score = 0;
     const matches = {};
 
+    // Bonus for NCLEX-specific materials
+    if (material.examType && /nclex/i.test(material.examType)) {
+      score += 10;
+    }
+
+    // Bonus for matching category
+    if (category && material.nclexCategory && 
+        material.nclexCategory.toLowerCase().includes(category.toLowerCase())) {
+      score += 8;
+    }
+
     searchTokens.forEach(token => {
-      // Title matches (highest weight)
+      // Title matches
       if (material.title && material.title.toLowerCase().includes(token)) {
         score += 5;
         matches[token] = (matches[token] || 0) + 1;
       }
 
-      // Topic matches (high weight)
+      // NCLEX Category matches (high weight)
+      if (material.nclexCategory && material.nclexCategory.toLowerCase().includes(token)) {
+        score += 6;
+        matches[token] = (matches[token] || 0) + 1;
+      }
+
+      // Topic matches
       if (material.topic && material.topic.toLowerCase().includes(token)) {
         score += 4;
         matches[token] = (matches[token] || 0) + 1;
       }
 
-      // Keyword matches (high weight)
+      // Keyword matches
       if (material.keywords && material.keywords.some(kw => 
         kw.toLowerCase().includes(token))) {
         score += 4;
         matches[token] = (matches[token] || 0) + 1;
       }
 
-      // Level matches (medium weight)
-      if (material.level && material.level.toLowerCase().includes(token)) {
-        score += 3;
-        matches[token] = (matches[token] || 0) + 1;
-      }
-
-      // Description matches (lower weight)
+      // Description matches
       if (material.description && material.description.toLowerCase().includes(token)) {
         score += 2;
         matches[token] = (matches[token] || 0) + 1;
       }
     });
 
-    // Bonus for multiple token matches in same field
+    // Bonus for multiple token matches
     const totalMatches = Object.values(matches).reduce((sum, count) => sum + count, 0);
     if (totalMatches > 1) {
       score += totalMatches * 2;
@@ -224,115 +246,201 @@ function scoreMaterialRelevance(materials, searchTokens) {
       matchedTokens: Object.keys(matches)
     };
   })
-  .filter(item => item.relevanceScore > 0) // Only keep items with some matches
+  .filter(item => item.relevanceScore > 0)
   .sort((a, b) => b.relevanceScore - a.relevanceScore);
 }
 
-/**
- * Get fallback materials when no good matches
- */
-async function getFallbackMaterials(limit = 5) {
-  return await Material.find()
+// Get fallback NCLEX materials
+async function getNCLEXFallbackMaterials(category = null, limit = 5) {
+  const query = category 
+    ? { nclexCategory: { $regex: category, $options: 'i' } }
+    : { examType: { $regex: 'nclex', $options: 'i' } };
+  
+  return await Material.find(query)
     .sort({ createdAt: -1 })
     .limit(limit)
     .lean();
 }
 
-/**
- * Analyze search quality and determine if we need clarification
- */
-function needsMoreClarification(searchTokens, results, userQuery) {
-  // If no results at all
-  if (results.length === 0) {
-    return `I couldn't find any materials matching your search. Could you provide more details about:\n\n• The specific exam name\n• Main topics you need\n• Your current nursing level\n\nFor example: "NCLEX pharmacology questions for med-surg level"`;
-  }
-
-  // If results have very low relevance scores
-  const goodMatches = results.filter(item => item.relevanceScore >= 3);
-  if (goodMatches.length === 0) {
-    const matchedTokens = results[0]?.matchedTokens || [];
-    
-    if (matchedTokens.length > 0) {
-      return `I found some materials related to ${matchedTokens.join(', ')}, but I want to make sure I get you exactly what you need. Could you tell me:\n\n• Is there a specific exam type? (HESI, NCLEX, etc.)\n• What's the main topic focus?\n• Any particular nursing specialty?`;
-    } else {
-      return `I found some general materials, but I'd like to narrow it down for you. Could you specify:\n\n• What type of nursing exam are you preparing for?\n• Which subjects or topics are most challenging?\n• What's your current education level?`;
+// Handle NCLEX purchase flow
+async function handleNCLEXPurchase(user, category = null, selectedMaterial = null) {
+  try {
+    // Step 1: If no category selected, show categories
+    if (!category) {
+      return {
+        step: 'category_selection',
+        message: `🎯 *NCLEX Study Materials*\n\nPlease select which category you're preparing for:\n\n1. **Safe and Effective Care Environment**\n   • Patient safety & infection control\n   • Legal responsibilities & ethics\n   • Delegation & prioritization\n\n2. **Health Promotion and Maintenance**\n   • Growth & development\n   • Health screening & immunizations\n   • Disease prevention\n\n3. **Psychosocial Integrity**\n   • Mental health disorders\n   • Therapeutic communication\n   • Crisis intervention\n\n4. **Physiological Integrity**\n   • Medical-surgical nursing\n   • Pharmacology\n   • Acute & chronic illness\n\nReply with the *CATEGORY NAME* or *NUMBER* (1-4)`,
+        categories: Object.keys(NCLEX_CATEGORIES)
+      };
     }
-  }
 
-  // If too many results, help to narrow down
-  if (results.length > 8 && goodMatches.length > 5) {
-    const commonTopics = [...new Set(results.slice(0, 5).map(r => r.topic))].slice(0, 3);
-    return `I found several good options! To help me pick the best one, could you tell me which of these is most important:\n\n• ${commonTopics.join('\n• ')}\n\nOr specify the exact exam name if you know it?`;
-  }
+    // Step 2: If category selected but no material, show materials
+    if (category && !selectedMaterial) {
+      const searchResult = await findNCLEXMaterials('', category, 10);
+      
+      if (searchResult.type === 'materials' && searchResult.data.length > 0) {
+        let response = `📚 *NCLEX ${category} Materials*\n\n`;
+        
+        searchResult.data.forEach((material, index) => {
+          const shortDesc = material.description 
+            ? (material.description.length > 60 ? material.description.substring(0, 60) + '...' : material.description)
+            : 'Comprehensive NCLEX review material';
+            
+          response += `${index + 1}. **${material.title}**\n`;
+          response += `   📝 ${shortDesc}\n`;
+          response += `   🎯 Level: ${material.level || 'All Levels'}\n`;
+          if (material.examType) {
+            response += `   📋 For: ${material.examType}\n`;
+          }
+          response += `   ⭐ Relevance: ${material.relevanceScore || 'High'}/10\n\n`;
+        });
+        
+        response += `💡 Reply with the *NUMBER* (1-${Math.min(searchResult.data.length, 10)}) to select a material.\n`;
+        response += `Or type "back" to choose a different category.`;
+        
+        return {
+          step: 'material_selection',
+          message: response,
+          materials: searchResult.data,
+          category: category
+        };
+      } else {
+        return {
+          step: 'error',
+          message: `📭 No materials found for "${category}".\n\nPlease try another category or contact support.`
+        };
+      }
+    }
 
-  return null; // No clarification needed
+    // Step 3: Material selected - generate promo code and confirm
+    if (selectedMaterial) {
+      const promoCode = generatePromoCode();
+      
+      // Store purchase info (you would save this to your database)
+      const purchaseInfo = {
+        userId: user.id,
+        materialId: selectedMaterial._id,
+        materialTitle: selectedMaterial.title,
+        category: category,
+        promoCode: promoCode,
+        purchaseDate: new Date(),
+        status: 'pending'
+      };
+      
+      // Log purchase (replace with actual database save)
+      logger.info('Purchase initiated:', purchaseInfo);
+      
+      return {
+        step: 'confirmation',
+        message: `✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${category}\n📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`,
+        promoCode: promoCode,
+        material: selectedMaterial,
+        category: category
+      };
+    }
+
+  } catch (err) {
+    logger.error('Error in NCLEX purchase flow:', err);
+    return {
+      step: 'error',
+      message: '🚨 An error occurred. Please try again or contact support.'
+    };
+  }
 }
 
-/**
- * Get AI response with smart search and clarification
- */
-async function getAIResponse(user, message, options = {}) {
-  // First, perform intelligent search
-  const relatedMaterials = await findRelevantMaterials(message);
-  const searchTokens = extractSearchTokens(message);
-  
-  // Check if we need clarification
-  const clarificationNeeded = needsMoreClarification(searchTokens, relatedMaterials, message);
-  
-  // If clarification is needed and this is a purchase intent, ask first
-  if (clarificationNeeded && /buy|purchase/i.test(message)) {
-    return clarificationNeeded;
-  }
-
-  let finalPrompt;
-
-  if (/buy|purchase|payment/i.test(message)) {
-    finalPrompt = buildPurchasePrompt(user, message, relatedMaterials);
-  } else {
-    finalPrompt = buildStudyPrompt(user, message, relatedMaterials);
-  }
-
-  if (!config.OPENROUTER_KEY) {
-    logger.debug('AI stub active — returning smart search results.');
+// Get AI response for NCLEX-focused interactions
+async function getNCLEXAIResponse(user, message, context = {}) {
+  // Check for purchase intent
+  if (/\/buy|buy|purchase|payment/i.test(message)) {
+    // Parse category selection from message
+    let selectedCategory = null;
     
-    // Enhanced simulated response based on smart search
-    if (/buy|purchase/i.test(message)) {
-      if (relatedMaterials.length === 0) {
-        return `🔍 I searched our materials but didn't find exact matches. \n\nI have nursing resources for:\n• Various exam types (HESI, NCLEX, etc.)\n• Different specialty areas\n• Multiple education levels\n\nCould you tell me more specifically what you need?`;
-      }
-      
-      const goodMatches = relatedMaterials.filter(item => item.relevanceScore >= 3);
-      
-      if (goodMatches.length === 1) {
-        const material = goodMatches[0];
-        return `🎯 Perfect match! I found exactly what you need:\n\n*${material.title}*\n📚 Topic: ${material.topic}\n🎯 Level: ${material.level}\n${material.description ? `📝 ${material.description}\n` : ''}\nThis closely matches your search. Sending you the file now!`;
-      } 
-      else if (goodMatches.length > 0) {
-        let response = `🎯 I found ${goodMatches.length} great matches for you:\n\n`;
-        goodMatches.slice(0, 5).forEach((material, index) => {
-          const shortDesc = material.description 
-            ? (material.description.length > 80 ? material.description.substring(0, 80) + '...' : material.description)
-            : 'Comprehensive nursing material';
-            
-          response += `${index + 1}. *${material.title}*\n   📚 ${material.topic} | 🎯 ${material.level}\n   📝 ${shortDesc}\n\n`;
-        });
-        response += `💡 Reply with the NUMBER (1-${Math.min(goodMatches.length, 5)}) to get that material.`;
-        return response;
-      }
-      else {
-        // Poor matches but some results
-        let response = `🔍 I found some materials that might be relevant:\n\n`;
-        relatedMaterials.slice(0, 3).forEach((material, index) => {
-          response += `${index + 1}. *${material.title}* (${material.topic} - ${material.level})\n`;
-        });
-        response += `\nIf these don't match what you need, could you tell me:\n• The exact exam name?\n• Specific topics?\n• Your current level?`;
-        return response;
+    // Check for category numbers
+    if (/^[1-4]$/.test(message.trim())) {
+      const categories = Object.keys(NCLEX_CATEGORIES);
+      selectedCategory = categories[parseInt(message.trim()) - 1];
+    } 
+    // Check for category names
+    else {
+      Object.keys(NCLEX_CATEGORIES).forEach(category => {
+        if (message.toLowerCase().includes(category.toLowerCase().slice(0, 20))) {
+          selectedCategory = category;
+        }
+      });
+    }
+    
+    // Check for material selection (e.g., "1", "2", etc.)
+    let selectedMaterial = null;
+    if (context.materials && /^[0-9]+$/.test(message.trim())) {
+      const index = parseInt(message.trim()) - 1;
+      if (index >= 0 && index < context.materials.length) {
+        selectedMaterial = context.materials[index];
       }
     }
     
-    return `🧠 NurseAid: I'll help you with "${message}". (AI service not configured)`;
+    // Handle purchase flow
+    const purchaseResult = await handleNCLEXPurchase(
+      user, 
+      selectedCategory || context.currentCategory, 
+      selectedMaterial || context.selectedMaterial
+    );
+    
+    return purchaseResult;
   }
-
+  
+  // For study queries, use smart search
+  const searchResult = await findNCLEXMaterials(message);
+  
+  if (searchResult.type === 'category_selection') {
+    // This shouldn't happen in normal flow, but handle it
+    return handleNCLEXPurchase(user);
+  }
+  
+  const relatedMaterials = searchResult.data || [];
+  const searchTokens = extractNCLEXSearchTokens(message);
+  
+  // Check if we need clarification
+  const clarificationNeeded = needsNCLEXClarification(searchTokens, relatedMaterials, message);
+  
+  if (clarificationNeeded) {
+    return { step: 'clarification', message: clarificationNeeded };
+  }
+  
+  // Use AI for detailed responses
+  let finalPrompt;
+  
+  if (/study|learn|question|quiz|practice/i.test(message)) {
+    finalPrompt = buildStudyPrompt(user, message, relatedMaterials, 'NCLEX');
+  } else {
+    finalPrompt = buildPurchasePrompt(user, message, relatedMaterials, 'NCLEX');
+  }
+  
+  if (!config.OPENROUTER_KEY) {
+    // Simulated response for NCLEX
+    if (relatedMaterials.length > 0) {
+      let response = `🧠 *NCLEX Study Assistant*\n\nI found ${relatedMaterials.length} materials for your query:\n\n`;
+      
+      relatedMaterials.slice(0, 3).forEach((material, index) => {
+        response += `${index + 1}. **${material.title}**\n`;
+        response += `   📚 Category: ${material.nclexCategory || 'General'}\n`;
+        if (material.description) {
+          response += `   📝 ${material.description.substring(0, 80)}...\n`;
+        }
+        response += '\n';
+      });
+      
+      response += `💡 To purchase any material, type \`/buy\`\n`;
+      response += `📚 For practice questions, ask about specific topics`;
+      
+      return { step: 'study_assistance', message: response, materials: relatedMaterials };
+    } else {
+      return { 
+        step: 'no_materials', 
+        message: `📭 I couldn't find specific NCLEX materials for that.\n\nTry:\n• Asking about specific NCLEX categories\n• Using \`/buy\` to browse materials\n• Requesting practice questions on a topic` 
+      };
+    }
+  }
+  
   try {
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -340,84 +448,96 @@ async function getAIResponse(user, message, options = {}) {
         Authorization: `Bearer ${config.OPENROUTER_KEY}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://yourapp.com',
-        'X-Title': 'NurseAid Bot'
+        'X-Title': 'NCLEX Study Bot'
       },
       body: JSON.stringify({
         model: 'deepseek/deepseek-r1-0528-qwen3-8b:free',
         messages: [{ role: 'user', content: finalPrompt }],
-        max_tokens: options.maxTokens || 800
+        max_tokens: 800
       })
     });
-
+    
     const data = await res.json();
     
     if (data?.choices?.[0]?.message?.content) {
-      return data.choices[0].message.content.trim();
+      return { step: 'ai_response', message: data.choices[0].message.content.trim() };
     }
     
-    return '⚠️ Unexpected response from AI service.';
+    return { step: 'error', message: '⚠️ AI service returned unexpected response.' };
   } catch (err) {
     logger.error('AI request failed', err);
-    return '🚨 AI service temporarily unavailable.';
+    return { step: 'error', message: '🚨 AI service temporarily unavailable.' };
   }
 }
 
-/**
- * Smart material recommendation
- */
-async function recommendMaterials(topicQuery, limit = 5) {
-  const materials = await findRelevantMaterials(topicQuery, limit);
-  logger.info(`Smart recommendation: ${materials.length} materials for "${topicQuery}"`);
-  return materials;
+// NCLEX-specific clarification needs
+function needsNCLEXClarification(searchTokens, results, userQuery) {
+  if (results.length === 0) {
+    return `🔍 *No NCLEX Materials Found*\n\nI couldn't find materials matching your search.\n\nPlease specify:\n• NCLEX-RN or NCLEX-PN?\n• Which of the 4 main categories?\n• Specific topics within that category\n\nExample: "NCLEX-RN pharmacology questions for cardiac care"`;
+  }
+  
+  const goodMatches = results.filter(item => item.relevanceScore >= 3);
+  if (goodMatches.length === 0) {
+    return `🔍 *Need More Specifics*\n\nI found some materials but they're not a perfect match.\n\nCould you tell me:\n• Are you preparing for NCLEX-RN or PN?\n• Which test plan category?\n• What's your biggest challenge?`;
+  }
+  
+  if (results.length > 8) {
+    const categories = [...new Set(results.slice(0, 5).map(r => r.nclexCategory || r.topic))].slice(0, 3);
+    return `📚 *Multiple Options Available*\n\nI found materials in these areas:\n${categories.map(c => `• ${c}`).join('\n')}\n\nWhich one are you most interested in?`;
+  }
+  
+  return null;
 }
 
-/**
- * Generate simulated questions based on a topic
- */
-async function simulateQuestions(topic) {
+// NCLEX practice questions
+async function generateNCLEXQuestions(topic, category = null) {
   const cleanTopic = topic.replace(/[^\w\s]/gi, '').trim();
   
   if (!config.OPENROUTER_KEY) {
-    return `🧠 *Practice Questions for ${cleanTopic || 'Nursing'}*\n\n1. What are the key concepts in ${cleanTopic || 'this area'}?\n2. How would you apply ${cleanTopic || 'this knowledge'} in clinical practice?\n3. What nursing considerations are important for ${cleanTopic || 'this topic'}?\n4. How would you assess patient needs related to ${cleanTopic || 'this condition'}?\n5. What interventions would be most effective?\n\n*Study tip:* Focus on understanding the underlying principles!`;
+    const categoryInfo = category ? ` in ${category}` : '';
+    return `🧠 *NCLEX Practice Questions${categoryInfo}*\n\nTopic: ${cleanTopic || 'General Nursing'}\n\n1. What is the priority nursing intervention?\n2. Which assessment finding requires immediate action?\n3. How would you evaluate patient understanding?\n4. What are potential complications to monitor?\n5. Which teaching point is most important?\n\n💡 *NCLEX Tip:* Focus on safety, prioritization, and patient-centered care!`;
   }
-
+  
   try {
-    const prompt = `Generate 5 challenging nursing exam questions about: "${cleanTopic}".
-Make them realistic and focused on application, assessment, and critical thinking.`;
-
+    const prompt = `Generate 5 challenging NCLEX-style questions about "${cleanTopic}"${
+      category ? ` in the category: ${category}` : ''
+    }. Make them multiple choice with rationales. Focus on critical thinking, prioritization, and clinical judgment.`;
+    
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${config.OPENROUTER_KEY}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://yourapp.com',
-        'X-Title': 'NurseAid Bot'
+        'X-Title': 'NCLEX Study Bot'
       },
       body: JSON.stringify({
         model: 'deepseek/deepseek-r1-0528-qwen3-8b:free',
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 600
+        max_tokens: 800
       })
     });
-
+    
     const data = await res.json();
     
     if (data?.choices?.[0]?.message?.content) {
-      return `🧠 *Practice Questions for ${cleanTopic || 'Nursing'}*\n\n${data.choices[0].message.content.trim()}`;
+      return `🧠 *NCLEX Practice Questions*\n\n${data.choices[0].message.content.trim()}`;
     }
     
-    return `🧠 *Practice Questions for ${cleanTopic || 'Nursing'}*\n\n1. Key concepts in ${cleanTopic || 'this area'}\n2. Clinical applications\n3. Nursing assessments\n4. Appropriate interventions\n5. Evaluation methods`;
+    return `🧠 *NCLEX Practice Questions*\n\nFocus on application-level questions and clinical reasoning!`;
   } catch (err) {
-    logger.error('AI question simulation failed', err);
-    return `🧠 *Practice Questions for ${cleanTopic || 'Nursing'}*\n\nFocus on understanding core concepts and their clinical applications!`;
+    logger.error('AI question generation failed', err);
+    return `🧠 *NCLEX Practice Questions*\n\nPractice with scenario-based questions focusing on nursing judgment!`;
   }
 }
 
-// Export all necessary functions
+// Export all functions
 export {
-  findRelevantMaterials,
-  extractSearchTokens,
-  getAIResponse,
-  recommendMaterials,
-  simulateQuestions
+  findNCLEXMaterials,
+  extractNCLEXSearchTokens,
+  getNCLEXAIResponse,
+  handleNCLEXPurchase,
+  generateNCLEXQuestions,
+  generatePromoCode,
+  NCLEX_CATEGORIES
 };

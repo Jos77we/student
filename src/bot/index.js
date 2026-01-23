@@ -1,7 +1,12 @@
 import { Telegraf } from 'telegraf';
 import mongoose from 'mongoose';
 import { config } from '../config/env.js';
-import { getAIResponse, recommendMaterials, simulateQuestions } from '../services/ai.service.js';
+import { 
+  getNCLEXAIResponse, 
+  handleNCLEXPurchase, 
+  generateNCLEXQuestions,
+  NCLEX_CATEGORIES 
+} from '../services/ai.service.js';
 import { User } from '../models/user.model.js';
 import { Material } from '../models/material.model.js';
 import { logger } from '../utils/logger.js';
@@ -13,7 +18,7 @@ if (!config.TELEGRAM_TOKEN) {
 
 export const bot = new Telegraf(config.TELEGRAM_TOKEN || '');
 
-// Store user sessions for conversational flows
+// Store user sessions for NCLEX conversational flows
 const userSessions = new Map();
 
 // Middleware: ensure user exists
@@ -25,10 +30,12 @@ bot.use(async (ctx, next) => {
     if (!user) {
       user = new User({
         telegramId: tgId,
-        name: ctx.from.username || `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim()
+        name: ctx.from.username || `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim(),
+        examType: 'NCLEX-RN', // Default to NCLEX-RN
+        studyLevel: 'Candidate'
       });
       await user.save();
-      logger.info('Created new user', { telegramId: tgId });
+      logger.info('Created new NCLEX user', { telegramId: tgId });
     } else {
       user.lastActive = new Date();
       await user.save();
@@ -40,55 +47,75 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
-// /start command
+// /start command - NCLEX focused
 bot.start(async (ctx) => {
-  const welcome = `👋 Hi — I'm *NurseAid*, your study buddy for nursing courses.
-I can help you with topic reviews, revision papers, and simulated exam questions.
+  const welcome = `🎓 *Welcome to NCLEX Prep Bot!*\n\nI'm your dedicated assistant for NCLEX-RN and NCLEX-PN exam preparation. I can help you with:
 
-Commands:
+📚 *Study Materials* by NCLEX category
+💡 *Practice Questions* with detailed rationales
+🎯 *Test-Taking Strategies* for clinical judgment
+📥 *Revision Materials* purchase and download
+
+*NCLEX Test Plan Categories:*
+1. Safe and Effective Care Environment
+2. Health Promotion and Maintenance  
+3. Psychosocial Integrity
+4. Physiological Integrity
+
+*Commands:*
 • /help — show help
-• /buy — explore and purchase revision materials
+• /buy — browse & purchase NCLEX materials
+• /questions — generate practice questions
 • resume — continue where you left off
 
-What topic would you like help with today?`;
+What NCLEX topic would you like to focus on today?`;
   await ctx.replyWithMarkdown(welcome);
 });
 
 // /help command
 bot.help((ctx) => {
-  return ctx.replyWithMarkdown(`You can:
-• Use /buy to explore available nursing materials
-• Ask for specific topics: "I need help with cardiology"
-• Request practice questions: "Give me questions on pharmacology"
-• Or just describe what you're studying!`);
+  return ctx.replyWithMarkdown(`*NCLEX Prep Bot Help*\n\nYou can:
+• Use /buy to explore and purchase NCLEX materials
+• Use /questions to generate practice questions
+• Ask about specific NCLEX topics: "Help with cardiac pharmacology"
+• Request materials by category: "Need Psychosocial Integrity materials"
+• Get study tips: "How to study for NCLEX-RN"
+• Or describe what you're studying for personalized help!
+
+*Quick Tips:*
+• Focus on one NCLEX category at a time
+• Practice with scenario-based questions
+• Master prioritization and delegation
+• Review medication classifications`);
 });
 
-// Enhanced /buy command - Starts conversational flow
+// Enhanced /buy command - Starts NCLEX category selection flow
 bot.command('buy', async (ctx) => {
   const userId = String(ctx.from.id);
   
-  // Start conversational buy flow
+  // Start NCLEX purchase flow
   userSessions.set(userId, {
-    state: 'buy_flow',
-    step: 'ask_interest',
-    materials: null
+    state: 'nclex_purchase',
+    step: 'category_selection',
+    currentCategory: null,
+    selectedMaterial: null,
+    materials: [],
+    promoCode: null
   });
 
-  await ctx.replyWithMarkdown(`🎯 *Great! Let me help you find the perfect nursing materials.*
+  await ctx.replyWithMarkdown(`🎯 *NCLEX Study Materials Purchase*\n\nPlease select which NCLEX category you're preparing for:\n\n1. **Safe and Effective Care Environment**\n   • Patient safety & infection control\n   • Legal responsibilities & ethics\n   • Delegation & prioritization\n\n2. **Health Promotion and Maintenance**\n   • Growth & development\n   • Health screening & immunizations\n   • Disease prevention\n\n3. **Psychosocial Integrity**\n   • Mental health disorders\n   • Therapeutic communication\n   • Crisis intervention\n\n4. **Physiological Integrity**\n   • Medical-surgical nursing\n   • Pharmacology\n   • Acute & chronic illness\n\n💡 *Reply with the CATEGORY NAME or NUMBER (1-4)*`);
+});
 
-I have exam papers, revision guides, and practice materials across all nursing specialties.
+// /questions command for generating practice questions
+bot.command('questions', async (ctx) => {
+  const userId = String(ctx.from.id);
+  
+  userSessions.set(userId, {
+    state: 'question_generation',
+    step: 'ask_topic'
+  });
 
-To help me find what you need, could you tell me:
-
-🤔 *What are you currently studying or preparing for?*
-
-You can mention:
-• Specific topics (like "cardiology", "pediatrics", "pharmacology")
-• Exam types you're preparing for
-• Your current level or course
-• Any particular challenges you're facing
-
-Or just describe what you need help with!`);
+  await ctx.replyWithMarkdown(`🧠 *NCLEX Practice Questions Generator*\n\nWhich topic would you like questions on?\n\nExamples:\n• "Cardiac pharmacology"\n• "Delegation scenarios"\n• "Pediatric growth milestones"\n• "Mental health crisis intervention"\n\n💡 You can also specify a category:\n"questions for Psychosocial Integrity"`);
 });
 
 // Text message handler
@@ -97,16 +124,26 @@ bot.on('text', async (ctx) => {
   const userId = String(ctx.from.id);
   const session = userSessions.get(userId);
   
-  logger.debug('Incoming message', { from: ctx.from?.id, text, session });
+  logger.debug('Incoming NCLEX message', { from: ctx.from?.id, text, session });
 
-  // Handle buy flow conversations
-  if (session && session.state === 'buy_flow') {
-    return handleBuyFlow(ctx, session, text);
+  // Handle NCLEX purchase flow
+  if (session && session.state === 'nclex_purchase') {
+    return handleNCLEXPurchaseFlow(ctx, session, text);
+  }
+
+  // Handle question generation flow
+  if (session && session.state === 'question_generation') {
+    return handleQuestionGeneration(ctx, session, text);
   }
 
   // Handle material selection from list
-  if (session && session.state === 'awaiting_selection' && session.materials) {
+  if (session && session.state === 'awaiting_material_selection') {
     return handleMaterialSelection(ctx, session, text);
+  }
+
+  // Handle download confirmation
+  if (session && session.state === 'awaiting_download') {
+    return handleDownloadConfirmation(ctx, session, text);
   }
 
   // Clear any completed sessions
@@ -117,165 +154,281 @@ bot.on('text', async (ctx) => {
   // Resume flow
   if (text.toLowerCase() === 'resume') {
     const user = ctx.dbUser;
-    return ctx.reply(`Resuming your study, ${user.name}. Would you like to continue last topic or take a new pretest?`);
+    if (session) {
+      // Return to previous state
+      return continueFromSession(ctx, session);
+    }
+    return ctx.reply(`Welcome back, ${user.name}! Would you like to continue with NCLEX preparation or start a new topic?`);
   }
 
-  // Buying flow detection - start conversational flow
-  if (text.toLowerCase().includes('buy') || text.toLowerCase().includes('purchase') || text.toLowerCase().includes('want to buy')) {
+  // Buying flow detection - start NCLEX purchase flow
+  if (text.toLowerCase().includes('/buy') || (text.toLowerCase().includes('buy') && text.length > 10)) {
     const userId = String(ctx.from.id);
     
     userSessions.set(userId, {
-      state: 'buy_flow',
-      step: 'ask_interest',
-      materials: null
+      state: 'nclex_purchase',
+      step: 'category_selection',
+      currentCategory: null,
+      selectedMaterial: null,
+      materials: [],
+      promoCode: null
     });
 
-    await ctx.replyWithMarkdown(`🎯 *I'd love to help you find the right materials!*
-
-To get you exactly what you need, could you tell me:
-
-• What *specific topic* are you studying?
-• What *type of exam* are you preparing for?
-• What's your *current level* (fundamentals, med-surg, advanced, etc.)?
-• Any particular *challenges* you're facing?
-
-Just describe what you're working on and I'll find the best matches!`);
+    await ctx.replyWithMarkdown(`🎯 *NCLEX Materials Purchase*\n\nSelect a category to begin:\n\n1. Safe and Effective Care Environment\n2. Health Promotion and Maintenance\n3. Psychosocial Integrity\n4. Physiological Integrity\n\n💡 Reply with category name or number`);
     return;
   }
 
-  // Check if the user requested recommendations
-  if (text.toLowerCase().includes('material') || text.toLowerCase().includes('topic') || text.toLowerCase().includes('notes')) {
-    await ctx.reply('🔍 Searching for study materials related to your topic...');
-    const materials = await recommendMaterials(text);
-    return displayMaterials(ctx, materials, text);
+  // Practice questions detection
+  if (text.toLowerCase().includes('practice') || text.toLowerCase().includes('questions') || text.toLowerCase().includes('quiz')) {
+    await ctx.reply('🧠 Generating NCLEX-style practice questions...');
+    const questions = await generateNCLEXQuestions(text);
+    return ctx.replyWithMarkdown(questions);
   }
 
-  // If user wants simulated questions
-  if (text.toLowerCase().includes('simulate') || text.toLowerCase().includes('practice') || text.toLowerCase().includes('questions')) {
-    await ctx.reply('🧠 Generating simulated questions for your topic...');
-    const simulated = await simulateQuestions(text);
-    return ctx.reply(simulated);
-  }
-
-  // Default fallback — ask AI to interpret question
+  // Default fallback — use NCLEX AI response
   try {
-    await ctx.reply('Let me think... 🤖');
-    const aiReply = await getAIResponse(ctx.dbUser, text);
-    await ctx.reply(aiReply);
+    await ctx.reply('Analyzing your NCLEX query... 🤔');
+    const aiResponse = await getNCLEXAIResponse(ctx.dbUser, text, session || {});
+    
+    if (aiResponse.step) {
+      // Handle structured response
+      switch(aiResponse.step) {
+        case 'category_selection':
+          userSessions.set(userId, {
+            state: 'nclex_purchase',
+            step: 'category_selection',
+            currentCategory: null,
+            selectedMaterial: null,
+            materials: [],
+            promoCode: null
+          });
+          break;
+          
+        case 'material_selection':
+          userSessions.set(userId, {
+            state: 'nclex_purchase',
+            step: 'material_selection',
+            currentCategory: aiResponse.category,
+            selectedMaterial: null,
+            materials: aiResponse.materials || [],
+            promoCode: null
+          });
+          break;
+          
+        case 'confirmation':
+          userSessions.set(userId, {
+            state: 'nclex_purchase',
+            step: 'confirmation',
+            currentCategory: aiResponse.category,
+            selectedMaterial: aiResponse.material,
+            materials: [],
+            promoCode: aiResponse.promoCode
+          });
+          break;
+      }
+      
+      await ctx.replyWithMarkdown(aiResponse.message);
+    } else {
+      await ctx.replyWithMarkdown(aiResponse);
+    }
+    
   } catch (err) {
     logger.error('Error handling text', err);
-    await ctx.reply('Sorry — something went wrong while I tried to answer. Try again or type /help.');
+    await ctx.reply('⚠️ Sorry — something went wrong while processing your request. Try again or type /help.');
   }
 });
 
 /**
- * Handle the conversational buy flow
+ * Handle NCLEX purchase flow
  */
-async function handleBuyFlow(ctx, session, userInput) {
+async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
   const userId = String(ctx.from.id);
   
   try {
-    if (session.step === 'ask_interest') {
-      // User has described what they need - now search for materials
-      await ctx.reply(`🔍 Perfect! Let me search for materials related to "${userInput}"...`);
-      
-      const materials = await recommendMaterials(userInput, 10);
-      session.materials = materials;
-      
-      if (materials.length === 0) {
-        userSessions.set(userId, { state: 'completed' });
-        
-        return ctx.replyWithMarkdown(`🤔 I couldn't find exact matches for "${userInput}", but here are some popular categories:
-
-*Popular Nursing Topics:*
-• Cardiovascular Nursing
-• Pediatric Care & Development  
-• Pharmacology & Medication Administration
-• Medical-Surgical Nursing
-• Obstetrics & Gynecology
-• Mental Health Nursing
-• Anatomy & Physiology
-• Nursing Fundamentals
-
-Try using /buy again with one of these topics, or be more specific about what you need!`);
+    // Handle back command
+    if (userInput.toLowerCase() === 'back') {
+      if (session.step === 'material_selection') {
+        session.step = 'category_selection';
+        session.currentCategory = null;
+        userSessions.set(userId, session);
+        return ctx.replyWithMarkdown(`🔙 Returning to category selection.\n\nChoose a category:\n\n1. Safe and Effective Care Environment\n2. Health Promotion and Maintenance\n3. Psychosocial Integrity\n4. Physiological Integrity`);
+      } else if (session.step === 'confirmation') {
+        session.step = 'material_selection';
+        session.selectedMaterial = null;
+        userSessions.set(userId, session);
+        return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      
-      // Move to display step
-      session.step = 'display_results';
-      userSessions.set(userId, session);
-      
-      return displayMaterials(ctx, materials, userInput);
+    }
+
+    switch(session.step) {
+      case 'category_selection':
+        // Parse category selection
+        let selectedCategory = null;
+        
+        // Check for category numbers
+        if (/^[1-4]$/.test(userInput.trim())) {
+          const categories = Object.keys(NCLEX_CATEGORIES);
+          selectedCategory = categories[parseInt(userInput.trim()) - 1];
+        } 
+        // Check for category names
+        else {
+          Object.keys(NCLEX_CATEGORIES).forEach(category => {
+            if (userInput.toLowerCase().includes(category.toLowerCase().slice(0, 20)) || 
+                NCLEX_CATEGORIES[category].some(keyword => 
+                  userInput.toLowerCase().includes(keyword.toLowerCase()))) {
+              selectedCategory = category;
+            }
+          });
+        }
+        
+        if (selectedCategory) {
+          session.currentCategory = selectedCategory;
+          session.step = 'material_selection';
+          userSessions.set(userId, session);
+          
+          await ctx.replyWithMarkdown(`✅ *Selected: ${selectedCategory}*\n\n🔍 Searching for materials in this category...`);
+          
+          // Search for materials in this category
+          const materials = await Material.find({
+            nclexCategory: { $regex: selectedCategory, $options: 'i' },
+            examType: { $regex: 'NCLEX', $options: 'i' }
+          }).limit(10).lean();
+          
+          if (materials.length === 0) {
+            await ctx.replyWithMarkdown(`📭 No materials found for "${selectedCategory}".\n\nTry another category or type "back" to choose again.`);
+            session.step = 'category_selection';
+            session.currentCategory = null;
+            userSessions.set(userId, session);
+            return;
+          }
+          
+          session.materials = materials;
+          userSessions.set(userId, session);
+          
+          return displayNCLEXMaterials(ctx, materials, selectedCategory);
+        } else {
+          return ctx.replyWithMarkdown(`❌ Please select a valid NCLEX category:\n\n1. Safe and Effective Care Environment\n2. Health Promotion and Maintenance\n3. Psychosocial Integrity\n4. Physiological Integrity\n\n💡 Reply with the category name or number (1-4)`);
+        }
+        
+      case 'material_selection':
+        // Handle material selection by number
+        const selectedNumber = parseInt(userInput.trim());
+        
+        if (isNaN(selectedNumber) || selectedNumber < 1 || selectedNumber > session.materials.length) {
+          return ctx.replyWithMarkdown(`❌ Please select a valid number between 1 and ${session.materials.length}.\n\n💡 Just reply with the number (1, 2, 3, etc.) of the material you want.`);
+        }
+        
+        const selectedMaterial = session.materials[selectedNumber - 1];
+        session.selectedMaterial = selectedMaterial;
+        session.step = 'confirmation';
+        
+        // Generate promo code
+        const promoCode = Math.floor(100000 + Math.random() * 900000).toString();
+        session.promoCode = promoCode;
+        userSessions.set(userId, session);
+        
+        return ctx.replyWithMarkdown(`✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${session.currentCategory}\n📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n💰 **Price:** ${selectedMaterial.price === 'Free' ? 'Free' : `$${selectedMaterial.price} USD`}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`);
+        
+      case 'confirmation':
+        if (userInput.toLowerCase() === 'download') {
+          session.step = 'downloading';
+          userSessions.set(userId, session);
+          
+          // Verify promo code (in a real system, you'd validate this)
+          if (userInput === session.promoCode || userInput.toLowerCase() === 'download') {
+            await ctx.replyWithMarkdown(`📥 *Downloading your material...*\n\nUsing promo code: ${session.promoCode}`);
+            await sendMaterialFile(ctx, session.selectedMaterial);
+            
+            // Clear session after successful download
+            userSessions.delete(userId);
+          } else {
+            return ctx.replyWithMarkdown(`❌ Invalid promo code. Please enter the 6-digit code provided earlier or type "download" if you have it.`);
+          }
+        } else {
+          return ctx.replyWithMarkdown(`📥 To download, type "download"\n🔄 To choose different material, type "back"`);
+        }
+        break;
     }
     
   } catch (error) {
-    logger.error('Error in buy flow', error);
+    logger.error('Error in NCLEX purchase flow', error);
     userSessions.delete(userId);
-    await ctx.reply('Sorry, there was an error processing your request. Please try using /buy again.');
+    await ctx.reply('⚠️ Sorry, there was an error processing your request. Please try using /buy again.');
   }
 }
 
 /**
- * Display materials to user - handles both single and multiple results
+ * Display NCLEX materials to user
  */
-async function displayMaterials(ctx, materials, userInput) {
+async function displayNCLEXMaterials(ctx, materials, category) {
   const userId = String(ctx.from.id);
   
   if (materials.length === 0) {
-    return ctx.reply(`I couldn't find any materials matching "${userInput}". Try being more specific or use a different topic.`);
+    return ctx.replyWithMarkdown(`📭 No materials found for "${category}".\n\nTry another category or type "back" to choose again.`);
   }
   
-  if (materials.length === 1) {
-    // Single perfect match - send directly
-    const material = materials[0];
+  let response = `📚 *${category} Materials*\n\n`;
+  
+  materials.forEach((material, index) => {
+    const shortDesc = material.description 
+      ? (material.description.length > 60 ? material.description.substring(0, 60) + '...' : material.description)
+      : 'Comprehensive NCLEX review material';
     
-    await ctx.replyWithMarkdown(
-      `✅ *Perfect match found!*\n\n` +
-      `*${material.title}*\n` +
-      `📚 *Topic:* ${material.topic}\n` +
-      `🎯 *Level:* ${material.level}\n` +
-      `📝 *Description:* ${material.description || 'Comprehensive nursing exam material'}\n` +
-      `\n📄 *Downloading your file...*`
-    );
+    const priceInfo = material.price === 'Free' ? '💰 Free' : `💰 $${material.price} USD`;
     
-    // Send the PDF file
-    await sendMaterialFile(ctx, material);
-    
-    userSessions.set(userId, { state: 'completed' });
-    
-  } else {
-    // Multiple matches - show list for selection
-    let response = `📚 *I found ${materials.length} materials matching your needs:*\n\n`;
-    
-    materials.forEach((material, index) => {
-      const shortDesc = material.description 
-        ? (material.description.length > 80 ? material.description.substring(0, 80) + '...' : material.description)
-        : 'Comprehensive nursing exam material';
-        
-      response += `${index + 1}. *${material.title}*\n` +
-                 `   📚 ${material.topic} | 🎯 ${material.level}\n` +
-                 `   📝 ${shortDesc}\n\n`;
-    });
-    
-    response += '\n💡 *Please reply with the NUMBER of the material you want* (1, 2, 3, etc.)';
-    
-    // Store materials in user session for selection
-    userSessions.set(userId, {
-      state: 'awaiting_selection',
-      materials: materials,
-      query: userInput
-    });
-    
-    await ctx.replyWithMarkdown(response);
+    response += `${index + 1}. **${material.title}**\n`;
+    response += `   📝 ${shortDesc}\n`;
+    response += `   🎯 Level: ${material.level || 'All Levels'}\n`;
+    if (material.examType) {
+      response += `   📋 For: ${material.examType}\n`;
+    }
+    response += `   ${priceInfo}\n\n`;
+  });
+  
+  response += `💡 *Reply with the NUMBER (1-${Math.min(materials.length, 10)}) to select a material.*\n`;
+  response += `Or type "back" to choose a different category.`;
+  
+  // Update session to await material selection
+  const session = userSessions.get(userId);
+  if (session) {
+    session.state = 'nclex_purchase';
+    session.step = 'material_selection';
+    session.materials = materials;
+    userSessions.set(userId, session);
+  }
+  
+  await ctx.replyWithMarkdown(response);
+}
+
+/**
+ * Handle question generation flow
+ */
+async function handleQuestionGeneration(ctx, session, userInput) {
+  const userId = String(ctx.from.id);
+  
+  try {
+    if (session.step === 'ask_topic') {
+      await ctx.reply('🧠 Generating NCLEX practice questions...');
+      const questions = await generateNCLEXQuestions(userInput);
+      
+      userSessions.set(userId, { state: 'completed' });
+      
+      await ctx.replyWithMarkdown(questions);
+      await ctx.replyWithMarkdown(`💡 *Want more questions on a different topic?*\nJust ask! Or type /questions to start over.`);
+    }
+  } catch (error) {
+    logger.error('Error in question generation', error);
+    userSessions.delete(userId);
+    await ctx.reply('⚠️ Sorry, there was an error generating questions. Please try again.');
   }
 }
 
 /**
- * Handle material selection from list
+ * Handle material selection from list (legacy support)
  */
 async function handleMaterialSelection(ctx, session, userInput) {
   const userId = String(ctx.from.id);
-  const selection = userInput.trim();
-  const selectedNumber = parseInt(selection);
+  const selectedNumber = parseInt(userInput.trim());
   
   if (isNaN(selectedNumber) || selectedNumber < 1 || selectedNumber > session.materials.length) {
     return ctx.replyWithMarkdown(`❌ Please select a valid number between 1 and ${session.materials.length}.\n\n💡 Just reply with the number (1, 2, 3, etc.) of the material you want.`);
@@ -283,20 +436,109 @@ async function handleMaterialSelection(ctx, session, userInput) {
   
   const selectedMaterial = session.materials[selectedNumber - 1];
   
+  // Generate promo code
+  const promoCode = Math.floor(100000 + Math.random() * 900000).toString();
+  
   await ctx.replyWithMarkdown(
-    `✅ *Excellent choice!*\n\n` +
-    `*${selectedMaterial.title}*\n` +
-    `📚 *Topic:* ${selectedMaterial.topic}\n` +
-    `🎯 *Level:* ${selectedMaterial.level}\n` +
-    `📝 *Description:* ${selectedMaterial.description || 'Comprehensive nursing exam material'}\n` +
-    `\n📄 *Downloading your file...*`
+    `✅ *Purchase Confirmation*\n\n` +
+    `📦 **Selected Material:** ${selectedMaterial.title}\n` +
+    `📚 **Category:** ${selectedMaterial.nclexCategory || selectedMaterial.topic}\n` +
+    `📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n` +
+    `🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n` +
+    `💰 **Price:** ${selectedMaterial.price === 'Free' ? 'Free' : `$${selectedMaterial.price} USD`}\n\n` +
+    `🎟️ **Your Promo Code:** \`${promoCode}\`\n\n` +
+    `⚠️ *Please save this code! You'll need it to download your materials.*\n\n` +
+    `📥 Ready to download? Type "download ${promoCode}" to continue.`
   );
   
-  // Send the PDF file
-  await sendMaterialFile(ctx, selectedMaterial);
+  // Update session for download confirmation
+  userSessions.set(userId, {
+    state: 'awaiting_download',
+    selectedMaterial: selectedMaterial,
+    promoCode: promoCode
+  });
+}
+
+/**
+ * Handle download confirmation
+ */
+async function handleDownloadConfirmation(ctx, session, userInput) {
+  const userId = String(ctx.from.id);
   
-  // Clear the session
-  userSessions.set(userId, { state: 'completed' });
+  if (userInput.toLowerCase().includes('download') || userInput === session.promoCode) {
+    await ctx.replyWithMarkdown(`📥 *Downloading your material...*\n\nUsing promo code: ${session.promoCode}`);
+    await sendMaterialFile(ctx, session.selectedMaterial);
+    
+    // Clear session
+    userSessions.delete(userId);
+  } else {
+    await ctx.replyWithMarkdown(`❌ Please enter your promo code: ${session.promoCode}\n\nOr type "download ${session.promoCode}"`);
+  }
+}
+
+/**
+ * Continue from existing session
+ */
+async function continueFromSession(ctx, session) {
+  switch(session.state) {
+    case 'nclex_purchase':
+      switch(session.step) {
+        case 'category_selection':
+          return ctx.replyWithMarkdown(`🔍 Continuing NCLEX purchase...\n\nChoose a category:\n\n1. Safe and Effective Care Environment\n2. Health Promotion and Maintenance\n3. Psychosocial Integrity\n4. Physiological Integrity`);
+        case 'material_selection':
+          return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
+        case 'confirmation':
+          return ctx.replyWithMarkdown(`📥 Ready to download "${session.selectedMaterial.title}"?\n\nType "download" to continue with promo code: ${session.promoCode}`);
+      }
+      break;
+      
+    case 'question_generation':
+      return ctx.reply('🧠 What topic would you like practice questions on?');
+  }
+  
+  return ctx.reply('Welcome back! How can I help with your NCLEX preparation today?');
+}
+
+/**
+ * Update material statistics when file is sent
+ */
+async function updateMaterialStats(materialId) {
+  try {
+    const material = await Material.findById(materialId);
+    if (!material) {
+      logger.error('Material not found for stats update', { materialId });
+      return false;
+    }
+    
+    // Increment download count
+    material.downloads = (material.downloads || 0) + 1;
+    
+    // If the material is not free, increment purchases and revenue
+    if (material.price !== 'Free') {
+      material.purchases = (material.purchases || 0) + 1;
+      
+      // Calculate revenue based on price
+      const priceValue = parseFloat(material.price);
+      if (!isNaN(priceValue)) {
+        material.revenue = (material.revenue || 0) + priceValue;
+      }
+    }
+    
+    await material.save();
+    logger.info('NCLEX material stats updated', {
+      materialId: material._id,
+      title: material.title,
+      nclexCategory: material.nclexCategory,
+      downloads: material.downloads,
+      purchases: material.purchases,
+      price: material.price
+    });
+    
+    return true;
+  } catch (error) {
+    logger.error('Error updating material stats:', error);
+    return false;
+  }
 }
 
 /**
@@ -304,7 +546,12 @@ async function handleMaterialSelection(ctx, session, userInput) {
  */
 async function sendMaterialFile(ctx, material) {
   try {
-    logger.info(`Sending file for material: ${material.title}`, { fileId: material.fileId });
+    logger.info(`Sending NCLEX file: ${material.title}`, { 
+      materialId: material._id,
+      nclexCategory: material.nclexCategory,
+      fileId: material.fileId,
+      price: material.price 
+    });
     
     // Get the file from GridFS
     const bucket = getGFSBucket();
@@ -352,22 +599,54 @@ async function sendMaterialFile(ctx, material) {
     await ctx.replyWithChatAction('upload_document');
     
     // Use the actual filename from GridFS or fallback to material title
-    const fileName = material.fileName || fileInfo.filename || `${material.title}.pdf`;
+    const fileName = material.fileName || fileInfo.filename || `${material.title.replace(/[^\w\s]/gi, '')}.pdf`;
     
     await ctx.replyWithDocument({
       source: fileBuffer,
       filename: fileName
     }, {
-      caption: `📚 ${material.title}\n📖 Topic: ${material.topic}\n🎯 Level: ${material.level}${material.description ? `\n📝 ${material.description}` : ''}`
+      caption: `📚 *${material.title}*\n📖 NCLEX Category: ${material.nclexCategory || material.topic}\n🎯 Level: ${material.level}\n📋 For: ${material.examType || 'NCLEX-RN/PN'}\n💰 Price: ${material.price === 'Free' ? 'Free' : `$${material.price} USD`}${material.description ? `\n📝 ${material.description.substring(0, 100)}${material.description.length > 100 ? '...' : ''}` : ''}\n\n✅ Downloaded with NCLEX Prep Bot`
     });
 
-    logger.info(`File sent successfully: ${material.title}`, { fileSize: fileBuffer.length });
+    logger.info(`NCLEX file sent successfully: ${material.title}`, { fileSize: fileBuffer.length });
+    
+    // Update material statistics (downloads, purchases, revenue)
+    const statsUpdated = await updateMaterialStats(material._id);
+    if (!statsUpdated) {
+      logger.warn('Failed to update material statistics', { materialId: material._id });
+    }
+    
+    // Track user download history
+    try {
+      const user = ctx.dbUser;
+      if (user) {
+        if (!user.downloadedMaterials) {
+          user.downloadedMaterials = [];
+        }
+        user.downloadedMaterials.push({
+          materialId: material._id,
+          title: material.title,
+          nclexCategory: material.nclexCategory,
+          downloadedAt: new Date(),
+          price: material.price,
+          examType: material.examType
+        });
+        await user.save();
+        logger.info('User NCLEX download tracked', { 
+          userId: user.telegramId, 
+          materialId: material._id,
+          nclexCategory: material.nclexCategory 
+        });
+      }
+    } catch (userError) {
+      logger.error('Error tracking user download:', userError);
+    }
     
     // Offer follow-up help
-    await ctx.replyWithMarkdown(`🎉 *File sent successfully!*\n\nNeed more materials or have questions? Just ask! 💬`);
+    await ctx.replyWithMarkdown(`🎉 *Download complete!*\n\n📚 Need more NCLEX materials?\n💡 Want practice questions on this topic?\n🔄 Try another category?\n\nJust ask! I'm here to help you pass the NCLEX! 💪`);
 
   } catch (error) {
-    logger.error('Error sending material file:', error);
+    logger.error('Error sending NCLEX material file:', error);
     
     // Provide helpful error messages based on the error type
     if (error.message.includes('file') || error.message.includes('not found')) {
