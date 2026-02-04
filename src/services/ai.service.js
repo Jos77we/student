@@ -4,7 +4,7 @@ import { logger } from '../utils/logger.js';
 import { Material } from '../models/material.model.js';
 import { buildStudyPrompt, buildPurchasePrompt } from './prompt.service.js';
 
-// NCLEX Categories for structured selection
+// NCLEX Categories for structured selection - updated to match your model's enum
 const NCLEX_CATEGORIES = {
   'Safe and Effective Care Environment': [
     'patient safety', 'infection control', 'legal responsibilities', 'ethics',
@@ -36,12 +36,17 @@ function generatePromoCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// NCLEX-specific search that prioritizes categories
+// NCLEX-specific search that uses your actual model structure
 async function findNCLEXMaterials(userQuery, category = null, limit = 10) {
   try {
     // If user confirms /buy, show categories first
     if (userQuery.toLowerCase().includes('/buy') && !category) {
-      return { type: 'category_selection', categories: Object.keys(NCLEX_CATEGORIES) };
+      return { type: 'category_selection', categories: [
+        'Safe and Effective Care Environment',
+        'Health Promotion and Maintenance',
+        'Psychosocial Integrity',
+        'Physiological Integrity'
+      ] };
     }
 
     // Extract search tokens
@@ -56,18 +61,18 @@ async function findNCLEXMaterials(userQuery, category = null, limit = 10) {
     // Build search query with category priority
     const searchConditions = searchTokens.flatMap(token => [
       { title: { $regex: token, $options: 'i' } },
-      { topic: { $regex: token, $options: 'i' } },
-      { description: { $regex: token, $options: 'i' } },
-      { examType: { $regex: token, $options: 'i' } },
-      { nclexCategory: { $regex: token, $options: 'i' } },
-      { keywords: { $in: [new RegExp(token, 'i')] } }
+      { $or: [
+        { topics: { $regex: token, $options: 'i' } },
+        { description: { $regex: token, $options: 'i' } },
+        { keywords: { $in: [new RegExp(token, 'i')] } }
+      ]}
     ]);
 
     // Add category filter if specified
     const query = category 
       ? { 
           $and: [
-            { nclexCategory: { $regex: category, $options: 'i' } },
+            { category: category },
             { $or: searchConditions }
           ]
         }
@@ -85,15 +90,16 @@ async function findNCLEXMaterials(userQuery, category = null, limit = 10) {
       logger.info('No direct matches, trying partial matching');
       const partialConditions = searchTokens.flatMap(token => [
         { title: { $regex: `.*${token}.*`, $options: 'i' } },
-        { topic: { $regex: `.*${token}.*`, $options: 'i' } },
-        { description: { $regex: `.*${token}.*`, $options: 'i' } },
-        { nclexCategory: { $regex: `.*${token}.*`, $options: 'i' } }
+        { $or: [
+          { topics: { $elemMatch: { $regex: `.*${token}.*`, $options: 'i' } } },
+          { description: { $regex: `.*${token}.*`, $options: 'i' } }
+        ]}
       ]);
 
       const partialQuery = category 
         ? { 
             $and: [
-              { nclexCategory: { $regex: category, $options: 'i' } },
+              { category: category },
               { $or: partialConditions }
             ]
           }
@@ -136,15 +142,6 @@ function extractNCLEXSearchTokens(userQuery, category = null) {
     'nclex', 'rn', 'pn'
   ];
 
-  // Extract NCLEX exam types
-  const examPatterns = [
-    /nclex[\s-]*rn/gi,
-    /nclex[\s-]*pn/gi,
-    /nclex[\s-]*exam/gi,
-    /national council.*exam/gi,
-    /nursing board exam/gi
-  ];
-
   // Extract category-specific phrases
   const categoryPhrases = [];
   if (category) {
@@ -158,46 +155,32 @@ function extractNCLEXSearchTokens(userQuery, category = null) {
     });
   }
 
-  // Check for exam patterns
-  const examPhrases = [];
-  examPatterns.forEach(pattern => {
-    const matches = query.match(pattern);
-    if (matches) {
-      examPhrases.push(...matches.map(m => m.toLowerCase().trim()));
-    }
-  });
-
   // Extract individual meaningful words
   const words = query
     .split(/[\s\.,!?;:]+/)
     .filter(word => word.length > 2)
     .filter(word => !stopWords.includes(word))
-    .filter(word => ![...examPhrases, ...categoryPhrases].some(phrase => 
+    .filter(word => !categoryPhrases.some(phrase => 
       phrase.includes(word) || word.includes(phrase)));
 
   // Combine all tokens
-  const allTokens = [...examPhrases, ...categoryPhrases, ...words];
+  const allTokens = [...categoryPhrases, ...words];
   const uniqueTokens = [...new Set(allTokens)];
 
-  logger.info(`Extracted NCLEX tokens:`, { examPhrases, categoryPhrases, words, uniqueTokens });
+  logger.info(`Extracted NCLEX tokens:`, { categoryPhrases, words, uniqueTokens });
   
   return uniqueTokens;
 }
 
-// Score materials with NCLEX-specific weighting
+// Score materials with NCLEX-specific weighting - updated for your model
 function scoreNCLEXRelevance(materials, searchTokens, category = null) {
   return materials.map(material => {
     let score = 0;
     const matches = {};
 
-    // Bonus for NCLEX-specific materials
-    if (material.examType && /nclex/i.test(material.examType)) {
-      score += 10;
-    }
-
     // Bonus for matching category
-    if (category && material.nclexCategory && 
-        material.nclexCategory.toLowerCase().includes(category.toLowerCase())) {
+    if (category && material.category && 
+        material.category.toLowerCase().includes(category.toLowerCase())) {
       score += 8;
     }
 
@@ -208,16 +191,20 @@ function scoreNCLEXRelevance(materials, searchTokens, category = null) {
         matches[token] = (matches[token] || 0) + 1;
       }
 
-      // NCLEX Category matches (high weight)
-      if (material.nclexCategory && material.nclexCategory.toLowerCase().includes(token)) {
+      // Category matches (high weight)
+      if (material.category && material.category.toLowerCase().includes(token)) {
         score += 6;
         matches[token] = (matches[token] || 0) + 1;
       }
 
-      // Topic matches
-      if (material.topic && material.topic.toLowerCase().includes(token)) {
-        score += 4;
-        matches[token] = (matches[token] || 0) + 1;
+      // Topics array matches
+      if (material.topics && Array.isArray(material.topics)) {
+        const topicMatches = material.topics.filter(topic => 
+          topic.toLowerCase().includes(token));
+        if (topicMatches.length > 0) {
+          score += 4 * topicMatches.length;
+          matches[token] = (matches[token] || 0) + topicMatches.length;
+        }
       }
 
       // Keyword matches
@@ -253,8 +240,8 @@ function scoreNCLEXRelevance(materials, searchTokens, category = null) {
 // Get fallback NCLEX materials
 async function getNCLEXFallbackMaterials(category = null, limit = 5) {
   const query = category 
-    ? { nclexCategory: { $regex: category, $options: 'i' } }
-    : { examType: { $regex: 'nclex', $options: 'i' } };
+    ? { category: category }
+    : {};
   
   return await Material.find(query)
     .sort({ createdAt: -1 })
@@ -262,7 +249,7 @@ async function getNCLEXFallbackMaterials(category = null, limit = 5) {
     .lean();
 }
 
-// Handle NCLEX purchase flow
+// Handle NCLEX purchase flow - updated for your model
 async function handleNCLEXPurchase(user, category = null, selectedMaterial = null) {
   try {
     // Step 1: If no category selected, show categories
@@ -286,12 +273,13 @@ async function handleNCLEXPurchase(user, category = null, selectedMaterial = nul
             ? (material.description.length > 60 ? material.description.substring(0, 60) + '...' : material.description)
             : 'Comprehensive NCLEX review material';
             
+          const topicsList = material.topics && material.topics.length > 0 
+            ? material.topics.slice(0, 3).join(', ')
+            : 'General NCLEX topics';
+            
           response += `${index + 1}. **${material.title}**\n`;
           response += `   📝 ${shortDesc}\n`;
-          response += `   🎯 Level: ${material.level || 'All Levels'}\n`;
-          if (material.examType) {
-            response += `   📋 For: ${material.examType}\n`;
-          }
+          response += `   🎯 Topics: ${topicsList}\n`;
           response += `   ⭐ Relevance: ${material.relevanceScore || 'High'}/10\n\n`;
         });
         
@@ -330,9 +318,14 @@ async function handleNCLEXPurchase(user, category = null, selectedMaterial = nul
       // Log purchase (replace with actual database save)
       logger.info('Purchase initiated:', purchaseInfo);
       
+      // Format topics for display
+      const topicsList = selectedMaterial.topics && selectedMaterial.topics.length > 0 
+        ? selectedMaterial.topics.join(', ')
+        : 'General NCLEX topics';
+      
       return {
         step: 'confirmation',
-        message: `✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${category}\n📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`,
+        message: `✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${category}\n🎯 **Topics:** ${topicsList}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`,
         promoCode: promoCode,
         material: selectedMaterial,
         category: category
@@ -421,8 +414,13 @@ async function getNCLEXAIResponse(user, message, context = {}) {
       let response = `🧠 *NCLEX Study Assistant*\n\nI found ${relatedMaterials.length} materials for your query:\n\n`;
       
       relatedMaterials.slice(0, 3).forEach((material, index) => {
+        const topicsList = material.topics && material.topics.length > 0 
+          ? material.topics.slice(0, 3).join(', ')
+          : 'General';
+        
         response += `${index + 1}. **${material.title}**\n`;
-        response += `   📚 Category: ${material.nclexCategory || 'General'}\n`;
+        response += `   📚 Category: ${material.category || 'General'}\n`;
+        response += `   🎯 Topics: ${topicsList}\n`;
         if (material.description) {
           response += `   📝 ${material.description.substring(0, 80)}...\n`;
         }
@@ -473,16 +471,16 @@ async function getNCLEXAIResponse(user, message, context = {}) {
 // NCLEX-specific clarification needs
 function needsNCLEXClarification(searchTokens, results, userQuery) {
   if (results.length === 0) {
-    return `🔍 *No NCLEX Materials Found*\n\nI couldn't find materials matching your search.\n\nPlease specify:\n• NCLEX-RN or NCLEX-PN?\n• Which of the 4 main categories?\n• Specific topics within that category\n\nExample: "NCLEX-RN pharmacology questions for cardiac care"`;
+    return `🔍 *No NCLEX Materials Found*\n\nI couldn't find materials matching your search.\n\nPlease specify:\n• Which of the 4 main categories?\n• Specific topics within that category\n\nExample: "pharmacology questions for cardiac care"`;
   }
   
   const goodMatches = results.filter(item => item.relevanceScore >= 3);
   if (goodMatches.length === 0) {
-    return `🔍 *Need More Specifics*\n\nI found some materials but they're not a perfect match.\n\nCould you tell me:\n• Are you preparing for NCLEX-RN or PN?\n• Which test plan category?\n• What's your biggest challenge?`;
+    return `🔍 *Need More Specifics*\n\nI found some materials but they're not a perfect match.\n\nCould you tell me:\n• Which test plan category?\n• What's your biggest challenge?`;
   }
   
   if (results.length > 8) {
-    const categories = [...new Set(results.slice(0, 5).map(r => r.nclexCategory || r.topic))].slice(0, 3);
+    const categories = [...new Set(results.slice(0, 5).map(r => r.category || r.topic))].slice(0, 3);
     return `📚 *Multiple Options Available*\n\nI found materials in these areas:\n${categories.map(c => `• ${c}`).join('\n')}\n\nWhich one are you most interested in?`;
   }
   

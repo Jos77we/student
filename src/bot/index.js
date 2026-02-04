@@ -265,20 +265,35 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         // Parse category selection
         let selectedCategory = null;
         
+        // Map numbers to categories based on your model's enum
+        const categoryMap = {
+          '1': 'Safe and Effective Care Environment',
+          '2': 'Health Promotion and Maintenance',
+          '3': 'Psychosocial Integrity',
+          '4': 'Physiological Integrity'
+        };
+        
         // Check for category numbers
         if (/^[1-4]$/.test(userInput.trim())) {
-          const categories = Object.keys(NCLEX_CATEGORIES);
-          selectedCategory = categories[parseInt(userInput.trim()) - 1];
+          selectedCategory = categoryMap[userInput.trim()];
         } 
         // Check for category names
         else {
-          Object.keys(NCLEX_CATEGORIES).forEach(category => {
+          // Find matching category (case-insensitive partial match)
+          const categories = [
+            'Safe and Effective Care Environment',
+            'Health Promotion and Maintenance',
+            'Psychosocial Integrity',
+            'Physiological Integrity'
+          ];
+          
+          for (const category of categories) {
             if (userInput.toLowerCase().includes(category.toLowerCase().slice(0, 20)) || 
-                NCLEX_CATEGORIES[category].some(keyword => 
-                  userInput.toLowerCase().includes(keyword.toLowerCase()))) {
+                userInput.toLowerCase().includes(category.split(' ')[0].toLowerCase())) {
               selectedCategory = category;
+              break;
             }
-          });
+          }
         }
         
         if (selectedCategory) {
@@ -288,10 +303,9 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
           
           await ctx.replyWithMarkdown(`✅ *Selected: ${selectedCategory}*\n\n🔍 Searching for materials in this category...`);
           
-          // Search for materials in this category
+          // Search for materials in this category - use 'category' field from your model
           const materials = await Material.find({
-            nclexCategory: { $regex: selectedCategory, $options: 'i' },
-            examType: { $regex: 'NCLEX', $options: 'i' }
+            category: selectedCategory
           }).limit(10).lean();
           
           if (materials.length === 0) {
@@ -327,23 +341,23 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         session.promoCode = promoCode;
         userSessions.set(userId, session);
         
-        return ctx.replyWithMarkdown(`✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${session.currentCategory}\n📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n💰 **Price:** ${selectedMaterial.price === 'Free' ? 'Free' : `$${selectedMaterial.price} USD`}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`);
+        // Format topics for display
+        const topicsList = selectedMaterial.topics && selectedMaterial.topics.length > 0 
+          ? selectedMaterial.topics.join(', ')
+          : 'General NCLEX topics';
+        
+        return ctx.replyWithMarkdown(`✅ *Purchase Confirmation*\n\n📦 **Selected Material:** ${selectedMaterial.title}\n📚 **Category:** ${session.currentCategory}\n🎯 **Topics:** ${topicsList}\n💰 **Price:** ${selectedMaterial.price === 'Free' ? 'Free' : `$${selectedMaterial.price} USD`}\n\n🎟️ **Your Promo Code:** \`${promoCode}\`\n\n⚠️ *Please save this code! You'll need it to download your materials.*\n\n📥 Ready to download? Type "download" to continue.\n🔄 To choose different material, type "back".`);
         
       case 'confirmation':
         if (userInput.toLowerCase() === 'download') {
           session.step = 'downloading';
           userSessions.set(userId, session);
           
-          // Verify promo code (in a real system, you'd validate this)
-          if (userInput === session.promoCode || userInput.toLowerCase() === 'download') {
-            await ctx.replyWithMarkdown(`📥 *Downloading your material...*\n\nUsing promo code: ${session.promoCode}`);
-            await sendMaterialFile(ctx, session.selectedMaterial);
-            
-            // Clear session after successful download
-            userSessions.delete(userId);
-          } else {
-            return ctx.replyWithMarkdown(`❌ Invalid promo code. Please enter the 6-digit code provided earlier or type "download" if you have it.`);
-          }
+          await ctx.replyWithMarkdown(`📥 *Downloading your material...*\n\nUsing promo code: ${session.promoCode}`);
+          await sendMaterialFile(ctx, session.selectedMaterial);
+          
+          // Clear session after successful download
+          userSessions.delete(userId);
         } else {
           return ctx.replyWithMarkdown(`📥 To download, type "download"\n🔄 To choose different material, type "back"`);
         }
@@ -376,12 +390,14 @@ async function displayNCLEXMaterials(ctx, materials, category) {
     
     const priceInfo = material.price === 'Free' ? '💰 Free' : `💰 $${material.price} USD`;
     
+    // Use topics array instead of single topic
+    const topicsList = material.topics && material.topics.length > 0 
+      ? material.topics.slice(0, 3).join(', ') 
+      : 'General NCLEX topics';
+    
     response += `${index + 1}. **${material.title}**\n`;
     response += `   📝 ${shortDesc}\n`;
-    response += `   🎯 Level: ${material.level || 'All Levels'}\n`;
-    if (material.examType) {
-      response += `   📋 For: ${material.examType}\n`;
-    }
+    response += `   🎯 Topics: ${topicsList}\n`;
     response += `   ${priceInfo}\n\n`;
   });
   
@@ -442,9 +458,8 @@ async function handleMaterialSelection(ctx, session, userInput) {
   await ctx.replyWithMarkdown(
     `✅ *Purchase Confirmation*\n\n` +
     `📦 **Selected Material:** ${selectedMaterial.title}\n` +
-    `📚 **Category:** ${selectedMaterial.nclexCategory || selectedMaterial.topic}\n` +
-    `📋 **Exam Type:** ${selectedMaterial.examType || 'NCLEX-RN/PN'}\n` +
-    `🎯 **Level:** ${selectedMaterial.level || 'All Levels'}\n` +
+    `📚 **Category:** ${selectedMaterial.category}\n` +
+    `🎯 **Topics:** ${selectedMaterial.topics ? selectedMaterial.topics.join(', ') : 'General'}\n` +
     `💰 **Price:** ${selectedMaterial.price === 'Free' ? 'Free' : `$${selectedMaterial.price} USD`}\n\n` +
     `🎟️ **Your Promo Code:** \`${promoCode}\`\n\n` +
     `⚠️ *Please save this code! You'll need it to download your materials.*\n\n` +
@@ -528,7 +543,7 @@ async function updateMaterialStats(materialId) {
     logger.info('NCLEX material stats updated', {
       materialId: material._id,
       title: material.title,
-      nclexCategory: material.nclexCategory,
+      category: material.category,
       downloads: material.downloads,
       purchases: material.purchases,
       price: material.price
@@ -548,7 +563,7 @@ async function sendMaterialFile(ctx, material) {
   try {
     logger.info(`Sending NCLEX file: ${material.title}`, { 
       materialId: material._id,
-      nclexCategory: material.nclexCategory,
+      category: material.category,
       fileId: material.fileId,
       price: material.price 
     });
@@ -601,11 +616,16 @@ async function sendMaterialFile(ctx, material) {
     // Use the actual filename from GridFS or fallback to material title
     const fileName = material.fileName || fileInfo.filename || `${material.title.replace(/[^\w\s]/gi, '')}.pdf`;
     
+    // Format topics for caption
+    const topicsList = material.topics && material.topics.length > 0 
+      ? material.topics.join(', ')
+      : 'General NCLEX topics';
+    
     await ctx.replyWithDocument({
       source: fileBuffer,
       filename: fileName
     }, {
-      caption: `📚 *${material.title}*\n📖 NCLEX Category: ${material.nclexCategory || material.topic}\n🎯 Level: ${material.level}\n📋 For: ${material.examType || 'NCLEX-RN/PN'}\n💰 Price: ${material.price === 'Free' ? 'Free' : `$${material.price} USD`}${material.description ? `\n📝 ${material.description.substring(0, 100)}${material.description.length > 100 ? '...' : ''}` : ''}\n\n✅ Downloaded with NCLEX Prep Bot`
+      caption: `📚 *${material.title}*\n📖 Category: ${material.category}\n🎯 Topics: ${topicsList}\n💰 Price: ${material.price === 'Free' ? 'Free' : `$${material.price} USD`}${material.description ? `\n📝 ${material.description.substring(0, 100)}${material.description.length > 100 ? '...' : ''}` : ''}\n\n✅ Downloaded with NCLEX Prep Bot`
     });
 
     logger.info(`NCLEX file sent successfully: ${material.title}`, { fileSize: fileBuffer.length });
@@ -626,16 +646,15 @@ async function sendMaterialFile(ctx, material) {
         user.downloadedMaterials.push({
           materialId: material._id,
           title: material.title,
-          nclexCategory: material.nclexCategory,
+          category: material.category,
           downloadedAt: new Date(),
-          price: material.price,
-          examType: material.examType
+          price: material.price
         });
         await user.save();
         logger.info('User NCLEX download tracked', { 
           userId: user.telegramId, 
           materialId: material._id,
-          nclexCategory: material.nclexCategory 
+          category: material.category 
         });
       }
     } catch (userError) {
