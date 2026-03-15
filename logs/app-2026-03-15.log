@@ -21,3 +21,4 @@
 {"from":"7049080106","level":"debug","message":"Incoming message","state":"nclex_purchase","text":"1","timestamp":"2026-03-15T18:41:47.191+03:00"}
 {"amount":60,"code":"999297","level":"info","materialId":"6958d5952b98ab564baf7cf0","message":"[Payment] PromoCode issued","timestamp":"2026-03-15T18:41:47.388+03:00","userId":"68f8d0b6c6e9516ae9e5442f"}
 {"from":"7049080106","level":"debug","message":"Incoming message","state":"nclex_purchase","text":"back","timestamp":"2026-03-15T18:42:05.902+03:00"}
+{"level":"info","message":"Shutdown initiated","signal":"SIGINT","timestamp":"2026-03-15T18:49:54.815+03:00"}
