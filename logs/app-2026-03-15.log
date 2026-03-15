@@ -1,0 +1,23 @@
+{"level":"info","message":"✅ Connected to MongoDB","timestamp":"2026-03-15T18:02:46.796+03:00"}
+{"level":"info","message":"📦 GridFS bucket initialized","timestamp":"2026-03-15T18:02:46.798+03:00"}
+{"level":"info","message":"MongoDB connected","timestamp":"2026-03-15T18:02:46.798+03:00"}
+{"level":"info","message":"HTTP server started","port":3000,"timestamp":"2026-03-15T18:02:46.815+03:00"}
+{"level":"info","message":"✅ Connected to MongoDB","timestamp":"2026-03-15T18:03:47.535+03:00"}
+{"level":"info","message":"📦 GridFS bucket initialized","timestamp":"2026-03-15T18:03:47.539+03:00"}
+{"level":"info","message":"MongoDB connected","timestamp":"2026-03-15T18:03:47.539+03:00"}
+{"level":"info","message":"HTTP server started","port":3000,"timestamp":"2026-03-15T18:03:47.553+03:00"}
+{"level":"info","message":"✅ Connected to MongoDB","timestamp":"2026-03-15T18:09:43.217+03:00"}
+{"level":"info","message":"📦 GridFS bucket initialized","timestamp":"2026-03-15T18:09:43.221+03:00"}
+{"level":"info","message":"MongoDB connected","timestamp":"2026-03-15T18:09:43.222+03:00"}
+{"level":"info","message":"HTTP server started","port":3000,"timestamp":"2026-03-15T18:09:43.227+03:00"}
+{"env":"development","instanceId":"97j2r","level":"info","message":"Application started","port":3000,"timestamp":"2026-03-15T18:09:43.392+03:00"}
+{"level":"info","message":"Shutdown initiated","signal":"SIGINT","timestamp":"2026-03-15T18:15:14.027+03:00"}
+{"level":"info","message":"✅ Connected to MongoDB","timestamp":"2026-03-15T18:15:18.884+03:00"}
+{"level":"info","message":"📦 GridFS bucket initialized","timestamp":"2026-03-15T18:15:18.888+03:00"}
+{"level":"info","message":"MongoDB connected","timestamp":"2026-03-15T18:15:18.889+03:00"}
+{"level":"info","message":"HTTP server started","port":3000,"timestamp":"2026-03-15T18:15:18.912+03:00"}
+{"env":"development","instanceId":"6to2yo","level":"info","message":"Application started","port":3000,"timestamp":"2026-03-15T18:15:18.916+03:00"}
+{"from":"7049080106","level":"debug","message":"Incoming message","state":"nclex_purchase","text":"1","timestamp":"2026-03-15T18:41:43.192+03:00"}
+{"from":"7049080106","level":"debug","message":"Incoming message","state":"nclex_purchase","text":"1","timestamp":"2026-03-15T18:41:47.191+03:00"}
+{"amount":60,"code":"999297","level":"info","materialId":"6958d5952b98ab564baf7cf0","message":"[Payment] PromoCode issued","timestamp":"2026-03-15T18:41:47.388+03:00","userId":"68f8d0b6c6e9516ae9e5442f"}
+{"from":"7049080106","level":"debug","message":"Incoming message","state":"nclex_purchase","text":"back","timestamp":"2026-03-15T18:42:05.902+03:00"}
