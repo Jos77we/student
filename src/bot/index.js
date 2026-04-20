@@ -767,58 +767,75 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
 
     // ── 2. Material selection ────────────────────────────────────────────
     case 'material_selection': {
-      const num = parseInt(userInput.trim());
-      if (isNaN(num) || num < 1 || num > session.materials.length) {
-        return sendHTML(ctx, `❌ Reply with a number between 1 and ${session.materials.length}.`);
-      }
-      const mat = session.materials[num - 1];
-      session.selectedMaterial = mat;
+  const num = parseInt(userInput.trim());
+  if (isNaN(num) || num < 1 || num > session.materials.length) {
+    return sendHTML(ctx, `❌ Reply with a number between 1 and ${session.materials.length}.`);
+  }
+  const mat = session.materials[num - 1];
+  session.selectedMaterial = mat;
 
-      // Issue promo code in DB — links this user+material together
-      try {
-        const { issuePromoCode } = await import('../services/payment.service.js');
-        const promo = await issuePromoCode(ctx.dbUser, mat);
-        session.promoCode = promo.code;
-        audit(userId, 'purchase_promo_issued', {
-          promoCode: promo.code,
-          material:  mat.title,
-          amount:    mat.price,
-          category:  mat.category,
-        });
-      } catch (e) {
-        logger.error('[Buy] issuePromoCode failed:', e);
-        session.promoCode = Math.floor(100000 + Math.random() * 900000).toString();
-      }
+  // Issue promo code
+  try {
+    const { issuePromoCode } = await import('../services/payment.service.js');
+    const promo = await issuePromoCode(ctx.dbUser, mat);
+    session.promoCode = promo.code;
+  } catch (e) {
+    logger.error('[Buy] issuePromoCode failed:', e);
+    session.promoCode = Math.floor(100000 + Math.random() * 900000).toString();
+  }
 
-      session.step = 'awaiting_payment';
-      userSessions.set(userId, session);
-      audit(userId, 'purchase_payment_open', { promoCode: session.promoCode, material: session.selectedMaterial?.title });
+  session.step = 'awaiting_payment';
+  userSessions.set(userId, session);
 
-      const price  = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
-      const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
+  const price = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
+  const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
+  
+  // IMPORTANT: Get the server URL from env
+  const serverOrigin = process.env.SERVER_ORIGIN;
+  
+  // FALLBACK: If SERVER_ORIGIN isn't set, show a helpful error
+  if (!serverOrigin) {
+    await sendHTML(ctx, 
+      `⚠️ <b>Configuration Error</b>\n\n` +
+      `SERVER_ORIGIN is not set in .env file.\n\n` +
+      `Please add:\n` +
+      `<code>SERVER_ORIGIN=http://YOUR_SERVER_IP:3000</code>\n\n` +
+      `Then restart the bot.`
+    );
+    return;
+  }
+  
+  const paymentUrl = `${serverOrigin}/payment?code=${session.promoCode}`;
 
-      // Build Flutterwave payment URL using SERVER_ORIGIN and /payment route
-      const serverOrigin = process.env.SERVER_ORIGIN || 'http://localhost:3000';
-      const paymentUrl   = `${serverOrigin}/payment?code=${session.promoCode}`;
+  const msgText = 
+    `✅ <b>Purchase Confirmation</b>\n\n` +
+    `📦 <b>Material:</b> ${h(mat.title)}\n` +
+    `📚 <b>Category:</b> ${h(mat.category)}\n` +
+    `🎯 <b>Topics:</b> ${topics}\n` +
+    `💰 <b>Price:</b> ${price}\n` +
+    `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
+    `👇 <b>Tap the button below to complete payment</b>`;
 
-      const msgText =
-        `✅ <b>Purchase Confirmation</b>\n\n` +
-        `📦 <b>Material:</b> ${h(mat.title)}\n` +
-        `📚 <b>Category:</b> ${h(mat.category)}\n` +
-        `🎯 <b>Topics:</b> ${topics}\n` +
-        `💰 <b>Price:</b> ${price}\n` +
-        `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
-        `Tap <b>Complete Payment</b> below to pay securely via Flutterwave.`;
-
-      return sendHTML(ctx, msgText, {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '💳 Complete Payment', url: paymentUrl }],
-            [{ text: '← Back to materials', callback_data: 'pay_method:back' }],
-          ],
-        },
-      });
+  // Send message WITH the button
+  await ctx.telegram.sendMessage(ctx.chat.id, msgText, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '💳 Pay Now', url: paymentUrl }],
+        [{ text: '← Back to materials', callback_data: 'pay_method:back' }]
+      ]
     }
+  });
+  
+  // Log for debugging
+  logger.info('[Payment] Sent payment button', { 
+    userId, 
+    promoCode: session.promoCode, 
+    url: paymentUrl 
+  });
+  
+  return;
+}
 
     // Awaiting payment — user has the link, remind them or allow back
     case 'awaiting_payment': {
