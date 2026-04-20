@@ -7,8 +7,14 @@ import materialRoutes   from './routes/material.routes.js';
 import userRoutes       from './routes/user.routes.js';
 import paymentRoutes    from './routes/payment.routes.js';
 import cors             from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicDir = path.join(__dirname, '../public');
 
 // ─── CORS ──────────────────────────────────────────────────────────────────────
 app.use(cors({
@@ -38,15 +44,8 @@ app.use('/api/payment/webhook',
 );
 
 // Serve payment page at /pay?code=XXXXXX
-app.get('/pay', (req, res) => {
-  // Inject the public key so it doesn't need to be hard-coded in HTML
-  let html = readFileSync(path.join(process.cwd(), 'public/payment_page.html'), 'utf8');
-  html = html.replace(
-    'YOUR_FLUTTERWAVE_PUBLIC_KEY_HERE',
-    process.env.FLW_PUBLIC_KEY || ''
-  );
-  res.setHeader('Content-Type', 'text/html');
-  res.send(html);
+app.get('/payment', (req, res) => {
+  res.sendFile(path.join(publicDir, 'payment_page.html'));
 });
 
 // ─── JSON body parser for all other routes ────────────────────────────────────

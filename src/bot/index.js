@@ -797,12 +797,9 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
       const price  = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
       const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
 
-      // Build payment URL — must end with / before ? for Telegram to accept it
-      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5713').replace(/\/$/, '');
-      const paymentUrl   = `${frontendBase}/?code=${session.promoCode}`;
-
-      // Telegram rejects localhost URLs in inline buttons — detect and use text link instead
-      const isLocalhost  = frontendBase.includes('localhost') || frontendBase.includes('127.0.0.1');
+      // Build Flutterwave payment URL using SERVER_ORIGIN and /payment route
+      const serverOrigin = process.env.SERVER_ORIGIN || 'http://localhost:3000';
+      const paymentUrl   = `${serverOrigin}/payment?code=${session.promoCode}`;
 
       const msgText =
         `✅ <b>Purchase Confirmation</b>\n\n` +
@@ -811,21 +808,19 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         `🎯 <b>Topics:</b> ${topics}\n` +
         `💰 <b>Price:</b> ${price}\n` +
         `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
-        (isLocalhost
-          ? `Open this link to complete payment:\n<a href="${paymentUrl}">${paymentUrl}</a>\n\n<i>Set FRONTEND_URL in .env to your ngrok/production URL to get a button here instead.</i>`
-          : `Tap <b>Complete Payment</b> below to pay via Wise.`);
+        `Tap <b>Complete Payment</b> below to pay securely via Flutterwave.`;
 
-      const replyMarkup = isLocalhost
-        ? { inline_keyboard: [[{ text: '← Back to materials', callback_data: 'pay_method:back' }]] }
-        : { inline_keyboard: [
+      return sendHTML(ctx, msgText, {
+        reply_markup: {
+          inline_keyboard: [
             [{ text: '💳 Complete Payment', url: paymentUrl }],
             [{ text: '← Back to materials', callback_data: 'pay_method:back' }],
-          ]};
-
-      return sendHTML(ctx, msgText, { reply_markup: replyMarkup });
+          ],
+        },
+      });
     }
 
-    // Awaiting payment — user has the link, nothing more to do in chat
+    // Awaiting payment — user has the link, remind them or allow back
     case 'awaiting_payment': {
       const low = userInput.toLowerCase();
       if (low === 'back') {
@@ -833,17 +828,10 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         userSessions.set(userId, session);
         return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5713').replace(/\/$/, '');
-      const paymentUrl   = `${frontendBase}/?code=${session.promoCode}`;
-      const isLocalhost  = frontendBase.includes('localhost') || frontendBase.includes('127.0.0.1');
-
-      if (isLocalhost) {
-        return sendHTML(ctx,
-          `💳 Open this link to complete your payment:\n<a href="${paymentUrl}">${paymentUrl}</a>\n\nOr type <b>back</b> to choose a different material.`
-        );
-      }
+      const serverOrigin = process.env.SERVER_ORIGIN || 'http://localhost:3000';
+      const paymentUrl   = `${serverOrigin}/payment?code=${session.promoCode}`;
       return sendHTML(ctx,
-        `💳 Tap the button to complete your payment, or type <b>back</b> to choose a different material.`,
+        `💳 Tap the button to complete your Flutterwave payment, or type <b>back</b> to choose a different material.`,
         {
           reply_markup: {
             inline_keyboard: [
@@ -854,137 +842,11 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         }
       );
     }
-    case 'method_selection': {
-      const low = userInput.toLowerCase();
-      if (low === '1' || low.includes('wise')) {
-        session.paymentMethod = 'wise'; session.step = 'name';
-        userSessions.set(userId, session);
-        return sendWiseCard(ctx, session);
-      }
-      if (low === '2' || low.includes('bank')) {
-        session.paymentMethod = 'bank_transfer'; session.step = 'name';
-        userSessions.set(userId, session);
-        return sendBankCard(ctx, session);
-      }
-      return sendHTML(ctx, 'Tap <b>💚 Pay with Wise</b> or <b>🏦 Bank Transfer</b> above.');
-    }
-
-    // ── 4. Collect name (ForceReply) ─────────────────────────────────────
-    case 'name': {
-      if (userInput.trim().length < 2) {
-        return sendForceReply(ctx, '❌ Please enter your full name (at least 2 characters):');
-      }
-      session.senderName = userInput.trim();
-      session.step = 'email';
-      userSessions.set(userId, session);
-      return sendForceReply(ctx,
-        `✅ <b>Name:</b> ${h(session.senderName)}\n\n` +
-        `📧 Now enter your <b>email address</b> for your receipt:`
-      );
-    }
-
-    // ── 5. Collect email (ForceReply) ────────────────────────────────────
-    case 'email': {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userInput.trim())) {
-        return sendForceReply(ctx, '❌ Please enter a valid email address:');
-      }
-      session.senderEmail = userInput.trim();
-      session.step = 'ref';
-      userSessions.set(userId, session);
-      return sendForceReply(ctx,
-        `✅ <b>Email:</b> ${h(session.senderEmail)}\n\n` +
-        `🔖 Paste your <b>${session.paymentMethod === 'wise' ? 'Wise transfer ID' : 'bank reference number'}</b>:\n` +
-        `<i>(Find this in your payment receipt or banking app)</i>`
-      );
-    }
-
-    // ── 6. Collect transaction ref (ForceReply) ──────────────────────────
-    case 'ref': {
-      if (userInput.trim().length < 3) {
-        return sendForceReply(ctx, '❌ Please paste your transaction reference:');
-      }
-      session.transactionRef = userInput.trim();
-      session.step = 'confirming';
-      userSessions.set(userId, session);
-      const mat = session.selectedMaterial;
-      return sendHTML(ctx,
-        `📋 <b>Payment Summary</b>\n` +
-        `─────────────────────\n` +
-        `📦 ${h(mat.title)}\n` +
-        `💰 <b>${mat.price === 'Free' ? 'Free' : `$${mat.price} USD`}</b>\n` +
-        `💳 ${session.paymentMethod === 'wise' ? 'Wise' : 'Bank Transfer'}\n` +
-        `🎟 Promo code: <code>${session.promoCode}</code>\n` +
-        `👤 ${h(session.senderName)}\n` +
-        `📧 ${h(session.senderEmail)}\n` +
-        `🔖 Ref: <code>${h(session.transactionRef)}</code>\n` +
-        `─────────────────────\n\n` +
-        `Everything look correct? Tap <b>Confirm &amp; Send File</b> to complete.`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '✅ Confirm & Send File', callback_data: 'pay_confirm' }],
-              [{ text: '← Back',                callback_data: 'pay_method:back' }],
-            ],
-          },
-        }
-      );
-    }
-
-    // ── 7. Confirming (text fallback if user types "confirm") ────────────
-    case 'confirming': {
-      if (userInput.toLowerCase() !== 'confirm') {
-        return sendHTML(ctx, 'Tap <b>✅ Confirm &amp; Send File</b> above, or type <b>back</b>.');
-      }
-      return processPaymentAndDeliver(ctx, session, userId);
-    }
   }
 }
 
-// ── Wise payment instructions card ────────────────────────────────────────────
-async function sendWiseCard(ctx, session) {
-  const mat   = session.selectedMaterial;
-  const link  = process.env.WISE_PAYMENT_LINK   || 'https://wise.com/pay/me/YOUR_USERNAME';
-  const name  = process.env.WISE_ACCOUNT_HOLDER || 'Account Holder';
-  const price = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
-  const code  = session.promoCode;
-  await sendHTML(ctx,
-    `💚 <b>Pay with Wise</b>\n` +
-    `─────────────────────\n` +
-    `👤 <b>Account Holder:</b> ${h(name)}\n` +
-    `💰 <b>Amount:</b> ${h(String(price))}\n` +
-    `🔗 <b>Wise Link:</b> ${h(link)}\n\n` +
-    `📌 <b>Payment reference — use this exact code:</b>\n` +
-    `<code>${code}</code>\n\n` +
-    `<i>Open the Wise link, enter the amount, and paste the code above as the payment reference.</i>\n` +
-    `─────────────────────`
-  );
-  return sendForceReply(ctx, '✅ After paying, enter your <b>full name</b> as it appears on your Wise account:');
-}
-
-// ── Bank transfer instructions card ───────────────────────────────────────────
-async function sendBankCard(ctx, session) {
-  const mat  = session.selectedMaterial;
-  const iban = process.env.WISE_IBAN           || 'GB00 WISE 0000 0000 0000 00';
-  const bic  = process.env.WISE_BIC            || 'TRWIGB2L';
-  const name = process.env.WISE_ACCOUNT_HOLDER || 'Account Holder';
-  const code = session.promoCode;
-  await sendHTML(ctx,
-    `🏦 <b>Bank Transfer Details</b>\n` +
-    `─────────────────────\n` +
-    `👤 <b>Account Holder:</b> ${h(name)}\n` +
-    `🏛 <b>Bank:</b> Wise (TransferWise)\n` +
-    `💳 <b>IBAN:</b> <code>${h(iban)}</code>\n` +
-    `🔀 <b>BIC/SWIFT:</b> <code>${h(bic)}</code>\n` +
-    `💰 <b>Amount:</b> $${h(String(mat.price))} USD\n\n` +
-    `📌 <b>Payment reference — use this exact code:</b>\n` +
-    `<code>${code}</code>\n\n` +
-    `<i>Include the promo code as the reference so your payment is matched to your order.</i>\n` +
-    `─────────────────────`
-  );
-  return sendForceReply(ctx, '✅ After transferring, enter your <b>full name</b> as it appears on your bank account:');
-}
-
 // ── Process confirmed payment, save to DB, deliver file ───────────────────────
+// (This remains the same, triggered after Flutterwave verification in payment_page.html)
 async function processPaymentAndDeliver(ctx, session, userId) {
   await sendHTML(ctx, '⏳ <b>Processing...</b>');
   try {
