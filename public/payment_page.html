@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NCLEX Prep — Secure Payment</title>
+  <script src="https://checkout.flutterwave.com/v3.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:  #0a7c5c;
+      --green2: #0d9b72;
+      --bg:     #f4f7f5;
+      --card:   #ffffff;
+      --text:   #1a2e24;
+      --muted:  #6b7f76;
+      --border: #d4e4dc;
+      --red:    #c0392b;
+      --radius: 12px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .logo { font-size: 2rem; margin-bottom: 8px; }
+    .brand { font-size: 1.15rem; font-weight: 700; color: var(--green); margin-bottom: 24px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 24px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+    }
+
+    /* ── Loading skeleton ── */
+    #loading-state { text-align: center; padding: 20px 0; }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Order summary ── */
+    #order-state { display: none; }
+    .order-title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 16px; }
+
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+      gap: 8px;
+    }
+    .detail-row:last-of-type { border-bottom: none; }
+    .detail-label { color: var(--muted); white-space: nowrap; }
+    .detail-value { font-weight: 600; text-align: right; word-break: break-word; max-width: 62%; }
+
+    .price-row { padding: 14px 0 4px; }
+    .price-row .detail-label { font-size: 1rem; font-weight: 600; color: var(--text); }
+    .price-row .detail-value { font-size: 1.3rem; color: var(--green); }
+
+    .code-badge {
+      display: inline-block;
+      background: #e8f5f0;
+      color: var(--green);
+      font-family: monospace;
+      font-size: 1rem;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 6px;
+      letter-spacing: 2px;
+    }
+
+    .topics-list {
+      display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 62%;
+    }
+    .topic-tag {
+      background: #e8f5f0; color: var(--green);
+      font-size: 0.75rem; padding: 3px 8px; border-radius: 20px;
+    }
+
+    /* ── Email field ── */
+    .email-section { margin: 20px 0 0; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; color: var(--muted); }
+    input[type="email"] {
+      width: 100%; padding: 11px 14px;
+      border: 1px solid var(--border); border-radius: 8px;
+      font-size: 0.95rem; color: var(--text);
+      outline: none; transition: border-color 0.2s;
+    }
+    input[type="email"]:focus { border-color: var(--green); }
+    input[type="email"].err { border-color: var(--red); }
+
+    /* ── Pay button ── */
+    .pay-btn {
+      margin-top: 20px;
+      width: 100%; padding: 14px;
+      background: var(--green);
+      color: #fff; font-size: 1rem; font-weight: 700;
+      border: none; border-radius: 10px;
+      cursor: pointer; transition: background 0.2s, transform 0.1s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .pay-btn:hover:not(:disabled) { background: var(--green2); transform: translateY(-1px); }
+    .pay-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .secure-note {
+      margin-top: 12px; text-align: center;
+      font-size: 0.78rem; color: var(--muted);
+    }
+
+    /* ── Success state ── */
+    #success-state { display: none; text-align: center; padding: 10px 0; }
+    .success-icon { font-size: 3rem; margin-bottom: 12px; }
+    .success-title { font-size: 1.2rem; font-weight: 700; color: var(--green); margin-bottom: 8px; }
+    .success-sub { font-size: 0.9rem; color: var(--muted); line-height: 1.5; }
+
+    /* ── Error state ── */
+    #error-state { display: none; text-align: center; padding: 10px 0; }
+    .error-icon { font-size: 2.5rem; margin-bottom: 12px; }
+    .error-title { font-size: 1.1rem; font-weight: 700; color: var(--red); margin-bottom: 8px; }
+    .error-sub { font-size: 0.88rem; color: var(--muted); }
+    .retry-btn {
+      margin-top: 16px; padding: 10px 24px;
+      background: var(--text); color: #fff;
+      border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* ── Expired / already paid ── */
+    #expired-state { display: none; text-align: center; padding: 10px 0; }
+  </style>
+</head>
+<body>
+
+  <div class="logo">📚</div>
+  <div class="brand">NCLEX Prep Bot</div>
+
+  <div class="card">
+
+    <!-- Loading -->
+    <div id="loading-state">
+      <div class="spinner"></div>
+      <p style="color:var(--muted);font-size:.9rem;">Loading your order…</p>
+    </div>
+
+    <!-- Order ready -->
+    <div id="order-state">
+      <div class="order-title">Complete Your Purchase</div>
+
+      <div class="detail-row">
+        <span class="detail-label">Material</span>
+        <span class="detail-value" id="mat-title">—</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Category</span>
+        <span class="detail-value" id="mat-category">—</span>
+      </div>
+      <div class="detail-row" id="topics-row">
+        <span class="detail-label">Topics</span>
+        <div class="topics-list" id="mat-topics"></div>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Promo Code</span>
+        <span class="detail-value"><span class="code-badge" id="promo-code">—</span></span>
+      </div>
+      <div class="detail-row price-row">
+        <span class="detail-label">Total</span>
+        <span class="detail-value" id="mat-price">—</span>
+      </div>
+
+      <div class="email-section">
+        <label for="buyer-email">Email for receipt</label>
+        <input type="email" id="buyer-email" placeholder="you@example.com" autocomplete="email" />
+      </div>
+
+      <button class="pay-btn" id="pay-btn" onclick="launchFlutterwave()">
+        🔒 Pay Securely
+      </button>
+      <p class="secure-note">🔐 Powered by Flutterwave · 256-bit SSL</p>
+    </div>
+
+    <!-- Success -->
+    <div id="success-state">
+      <div class="success-icon">✅</div>
+      <div class="success-title">Payment Confirmed!</div>
+      <div class="success-sub">
+        Your study material is being sent to your Telegram chat right now.<br/><br/>
+        Return to the bot and type <strong>/help</strong> if you don't receive it within a minute.
+      </div>
+    </div>
+
+    <!-- Error -->
+    <div id="error-state">
+      <div class="error-icon">❌</div>
+      <div class="error-title" id="error-title">Payment Failed</div>
+      <div class="error-sub" id="error-sub">Something went wrong. Please try again.</div>
+      <button class="retry-btn" onclick="location.reload()">Try Again</button>
+    </div>
+
+    <!-- Expired / already paid -->
+    <div id="expired-state">
+      <div class="error-icon">⚠️</div>
+      <div class="error-title" id="expired-title">Order Unavailable</div>
+      <div class="error-sub" id="expired-sub"></div>
+    </div>
+
+  </div>
+
+  <script>
+    // ── Read promo code from URL: ?code=XXXXXX ──────────────────────────────────
+    const params    = new URLSearchParams(window.location.search);
+    const promoCode = (params.get('code') || '').toUpperCase();
+
+    // Flutterwave public key — injected from env at build/serve time via meta tag,
+    // or hard-code for local testing. DO NOT put secret key here.
+    // Replace the value below with your actual Flutterwave PUBLIC key.
+    const FLW_PUBLIC_KEY = window.FLW_PUBLIC_KEY || 'YOUR_FLUTTERWAVE_PUBLIC_KEY_HERE';
+
+    // Backend base URL — same origin by default
+    const API_BASE = window.API_BASE || '';
+
+    let orderData = null;
+
+    // ── Show / hide helpers ─────────────────────────────────────────────────────
+    function show(id)  { document.getElementById(id).style.display = 'block'; }
+    function hide(id)  { document.getElementById(id).style.display = 'none'; }
+    function showOnly(id) {
+      ['loading-state','order-state','success-state','error-state','expired-state']
+        .forEach(s => s === id ? show(s) : hide(s));
+    }
+
+    // ── Load order from backend ─────────────────────────────────────────────────
+    async function loadOrder() {
+      if (!promoCode) {
+        showOnly('expired-state');
+        document.getElementById('expired-title').textContent = 'No Order Found';
+        document.getElementById('expired-sub').textContent   = 'Return to the Telegram bot and use /buy to generate a payment link.';
+        return;
+      }
+
+      try {
+        const res  = await fetch(`${API_BASE}/api/payment/order/${promoCode}`);
+        const data = await res.json();
+
+        if (!data.ok) {
+          showOnly('expired-state');
+          document.getElementById('expired-title').textContent = res.status === 409 ? 'Already Paid' : 'Order Unavailable';
+          document.getElementById('expired-sub').textContent   = data.error || 'This link is no longer valid.';
+          return;
+        }
+
+        orderData = data.order;
+
+        // Fill in the UI
+        document.getElementById('mat-title').textContent    = orderData.materialTitle;
+        document.getElementById('mat-category').textContent = orderData.category;
+        document.getElementById('promo-code').textContent   = orderData.promoCode;
+        document.getElementById('mat-price').textContent    = `$${orderData.amountUSD} USD`;
+
+        const topicsEl = document.getElementById('mat-topics');
+        (orderData.topics || []).slice(0, 4).forEach(t => {
+          const tag = document.createElement('span');
+          tag.className   = 'topic-tag';
+          tag.textContent = t;
+          topicsEl.appendChild(tag);
+        });
+        if (!(orderData.topics || []).length) {
+          document.getElementById('topics-row').style.display = 'none';
+        }
+
+        showOnly('order-state');
+      } catch (err) {
+        showOnly('error-state');
+        document.getElementById('error-title').textContent = 'Could not load order';
+        document.getElementById('error-sub').textContent   = 'Check your connection and try again.';
+      }
+    }
+
+    // ── Launch Flutterwave modal ─────────────────────────────────────────────────
+    function launchFlutterwave() {
+      const emailInput = document.getElementById('buyer-email');
+      const email      = emailInput.value.trim();
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        emailInput.classList.add('err');
+        emailInput.focus();
+        return;
+      }
+      emailInput.classList.remove('err');
+      document.getElementById('pay-btn').disabled = true;
+
+      // tx_ref format: NCLEX-<promoCode>-<timestamp>
+      // The webhook extracts the promoCode from this
+      const txRef = `NCLEX-${promoCode}-${Date.now()}`;
+
+      FlutterwaveCheckout({
+        public_key:   FLW_PUBLIC_KEY,
+        tx_ref:       txRef,
+        amount:       orderData.amountUSD,
+        currency:     orderData.currency || 'USD',
+        payment_options: 'card, mobilemoneyghana, mpesa, ussd, banktransfer',
+        customer: {
+          email,
+          name:  email.split('@')[0],
+        },
+        meta: {
+          promo_code: promoCode,
+        },
+        customizations: {
+          title:       'NCLEX Prep Bot',
+          description: orderData.materialTitle,
+          logo:        'https://i.imgur.com/o8qU0gJ.png', // replace with your logo URL
+        },
+        callback: async function(response) {
+          // Called by Flutterwave when payment completes (success or failure)
+          if (response.status === 'successful' || response.status === 'completed') {
+            await verifyPayment(response.transaction_id, response.tx_ref);
+          } else {
+            document.getElementById('pay-btn').disabled = false;
+            showOnly('error-state');
+            document.getElementById('error-title').textContent = 'Payment Cancelled';
+            document.getElementById('error-sub').textContent   = 'Your payment was not completed. You can try again.';
+          }
+        },
+        onclose: function() {
+          // Re-enable button if user closes modal without paying
+          document.getElementById('pay-btn').disabled = false;
+        },
+      });
+    }
+
+    // ── Verify payment with our backend ─────────────────────────────────────────
+    async function verifyPayment(transactionId, txRef) {
+      showOnly('loading-state');
+      document.getElementById('loading-state').querySelector('p').textContent = 'Verifying payment…';
+
+      try {
+        const res  = await fetch(`${API_BASE}/api/payment/verify`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ transactionId, txRef, promoCode }),
+        });
+        const data = await res.json();
+
+        if (data.ok) {
+          showOnly('success-state');
+        } else {
+          showOnly('error-state');
+          document.getElementById('error-title').textContent = 'Verification Failed';
+          document.getElementById('error-sub').textContent   =
+            data.error || 'Payment went through but we could not verify it. Contact support with code: ' + promoCode;
+        }
+      } catch (err) {
+        showOnly('error-state');
+        document.getElementById('error-title').textContent = 'Network Error';
+        document.getElementById('error-sub').textContent   =
+          'Payment may have gone through. Contact support with your promo code: ' + promoCode;
+      }
+    }
+
+    // ── Kick off ──────────────────────────────────────────────────────────────
+    loadOrder();
+  </script>
+</body>
+</html>
