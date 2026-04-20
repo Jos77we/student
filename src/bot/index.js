@@ -142,17 +142,6 @@ bot.on('callback_query', async (ctx) => {
   const data   = ctx.callbackQuery?.data || '';
   const userId = String(ctx.from.id);
 
-  // ── Payment method selection buttons ─────────────────────────────────────
-  // ── pay_confirm button ────────────────────────────────────────────────────
-  if (data === 'pay_confirm') {
-    const session = userSessions.get(userId);
-    if (!session || session.state !== 'nclex_purchase') {
-      return ctx.answerCbQuery('Session expired — use /buy to start again.', { show_alert: true });
-    }
-    await ctx.answerCbQuery();
-    return processPaymentAndDeliver(ctx, session, userId);
-  }
-
   // ── pay_method:back button ────────────────────────────────────────────────
   if (data.startsWith('pay_method:')) {
     const choice  = data.split(':')[1];
@@ -170,7 +159,7 @@ bot.on('callback_query', async (ctx) => {
       return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
     }
 
-    return; // other choices handled by frontend
+    return;
   }
 
   if (!data.startsWith('quiz_answer:')) return ctx.answerCbQuery();
@@ -689,14 +678,7 @@ function sendHTML(ctx, text, extra = {}) {
 //   • Inline keyboards  — buttons for method selection and confirm
 //   • ForceReply        — makes chat look like a form field at each step
 //
-// Steps:  category_selection → material_selection → method_selection
-//         → name → email → ref → confirming
-//
-// ForceReply prompts look like this in the chat:
-//   ┌─────────────────────────────┐
-//   │ Reply to: Enter your name   │ ← quoted prompt (greyed out)
-//   └─────────────────────────────┘
-//   [                           ] ← keyboard auto-opens
+// Steps:  category_selection → material_selection → awaiting_payment
 // ──────────────────────────────────────────────────────────────────────────────
 
 // Utility: send a ForceReply prompt
@@ -723,7 +705,7 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         '4. Physiological Integrity'
       );
     }
-    if (['method_selection','name','email','ref','confirming'].includes(session.step)) {
+    if (session.step === 'awaiting_payment') {
       session.step = 'material_selection';
       userSessions.set(userId, session);
       return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
@@ -797,9 +779,9 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
       const price  = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
       const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
 
-      // Build payment URL — must end with / before ? for Telegram to accept it
-      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5713').replace(/\/$/, '');
-      const paymentUrl   = `${frontendBase}/?code=${session.promoCode}`;
+      // Build payment URL pointing to the /pay page served by Express
+      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const paymentUrl   = `${frontendBase}/pay?code=${session.promoCode}`;
 
       // Telegram rejects localhost URLs in inline buttons — detect and use text link instead
       const isLocalhost  = frontendBase.includes('localhost') || frontendBase.includes('127.0.0.1');
@@ -812,8 +794,8 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         `💰 <b>Price:</b> ${price}\n` +
         `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
         (isLocalhost
-          ? `Open this link to complete payment:\n<a href="${paymentUrl}">${paymentUrl}</a>\n\n<i>Set FRONTEND_URL in .env to your ngrok/production URL to get a button here instead.</i>`
-          : `Tap <b>Complete Payment</b> below to pay via Wise.`);
+          ? `Open this link to complete payment:\n<a href="${paymentUrl}">${paymentUrl}</a>`
+          : `Tap <b>Complete Payment</b> below to pay securely via card or M-Pesa.`);
 
       const replyMarkup = isLocalhost
         ? { inline_keyboard: [[{ text: '← Back to materials', callback_data: 'pay_method:back' }]] }
@@ -833,8 +815,8 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         userSessions.set(userId, session);
         return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5713').replace(/\/$/, '');
-      const paymentUrl   = `${frontendBase}/?code=${session.promoCode}`;
+      const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const paymentUrl   = `${frontendBase}/pay?code=${session.promoCode}`;
       const isLocalhost  = frontendBase.includes('localhost') || frontendBase.includes('127.0.0.1');
 
       if (isLocalhost) {
@@ -843,7 +825,7 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         );
       }
       return sendHTML(ctx,
-        `💳 Tap the button to complete your payment, or type <b>back</b> to choose a different material.`,
+        `💳 Tap the button below to complete your payment, or type <b>back</b> to choose a different material.`,
         {
           reply_markup: {
             inline_keyboard: [
@@ -854,196 +836,12 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         }
       );
     }
-    case 'method_selection': {
-      const low = userInput.toLowerCase();
-      if (low === '1' || low.includes('wise')) {
-        session.paymentMethod = 'wise'; session.step = 'name';
-        userSessions.set(userId, session);
-        return sendWiseCard(ctx, session);
-      }
-      if (low === '2' || low.includes('bank')) {
-        session.paymentMethod = 'bank_transfer'; session.step = 'name';
-        userSessions.set(userId, session);
-        return sendBankCard(ctx, session);
-      }
-      return sendHTML(ctx, 'Tap <b>💚 Pay with Wise</b> or <b>🏦 Bank Transfer</b> above.');
-    }
-
-    // ── 4. Collect name (ForceReply) ─────────────────────────────────────
-    case 'name': {
-      if (userInput.trim().length < 2) {
-        return sendForceReply(ctx, '❌ Please enter your full name (at least 2 characters):');
-      }
-      session.senderName = userInput.trim();
-      session.step = 'email';
-      userSessions.set(userId, session);
-      return sendForceReply(ctx,
-        `✅ <b>Name:</b> ${h(session.senderName)}\n\n` +
-        `📧 Now enter your <b>email address</b> for your receipt:`
-      );
-    }
-
-    // ── 5. Collect email (ForceReply) ────────────────────────────────────
-    case 'email': {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userInput.trim())) {
-        return sendForceReply(ctx, '❌ Please enter a valid email address:');
-      }
-      session.senderEmail = userInput.trim();
-      session.step = 'ref';
-      userSessions.set(userId, session);
-      return sendForceReply(ctx,
-        `✅ <b>Email:</b> ${h(session.senderEmail)}\n\n` +
-        `🔖 Paste your <b>${session.paymentMethod === 'wise' ? 'Wise transfer ID' : 'bank reference number'}</b>:\n` +
-        `<i>(Find this in your payment receipt or banking app)</i>`
-      );
-    }
-
-    // ── 6. Collect transaction ref (ForceReply) ──────────────────────────
-    case 'ref': {
-      if (userInput.trim().length < 3) {
-        return sendForceReply(ctx, '❌ Please paste your transaction reference:');
-      }
-      session.transactionRef = userInput.trim();
-      session.step = 'confirming';
-      userSessions.set(userId, session);
-      const mat = session.selectedMaterial;
-      return sendHTML(ctx,
-        `📋 <b>Payment Summary</b>\n` +
-        `─────────────────────\n` +
-        `📦 ${h(mat.title)}\n` +
-        `💰 <b>${mat.price === 'Free' ? 'Free' : `$${mat.price} USD`}</b>\n` +
-        `💳 ${session.paymentMethod === 'wise' ? 'Wise' : 'Bank Transfer'}\n` +
-        `🎟 Promo code: <code>${session.promoCode}</code>\n` +
-        `👤 ${h(session.senderName)}\n` +
-        `📧 ${h(session.senderEmail)}\n` +
-        `🔖 Ref: <code>${h(session.transactionRef)}</code>\n` +
-        `─────────────────────\n\n` +
-        `Everything look correct? Tap <b>Confirm &amp; Send File</b> to complete.`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '✅ Confirm & Send File', callback_data: 'pay_confirm' }],
-              [{ text: '← Back',                callback_data: 'pay_method:back' }],
-            ],
-          },
-        }
-      );
-    }
-
-    // ── 7. Confirming (text fallback if user types "confirm") ────────────
-    case 'confirming': {
-      if (userInput.toLowerCase() !== 'confirm') {
-        return sendHTML(ctx, 'Tap <b>✅ Confirm &amp; Send File</b> above, or type <b>back</b>.');
-      }
-      return processPaymentAndDeliver(ctx, session, userId);
-    }
   }
 }
 
-// ── Wise payment instructions card ────────────────────────────────────────────
-async function sendWiseCard(ctx, session) {
-  const mat   = session.selectedMaterial;
-  const link  = process.env.WISE_PAYMENT_LINK   || 'https://wise.com/pay/me/YOUR_USERNAME';
-  const name  = process.env.WISE_ACCOUNT_HOLDER || 'Account Holder';
-  const price = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
-  const code  = session.promoCode;
-  await sendHTML(ctx,
-    `💚 <b>Pay with Wise</b>\n` +
-    `─────────────────────\n` +
-    `👤 <b>Account Holder:</b> ${h(name)}\n` +
-    `💰 <b>Amount:</b> ${h(String(price))}\n` +
-    `🔗 <b>Wise Link:</b> ${h(link)}\n\n` +
-    `📌 <b>Payment reference — use this exact code:</b>\n` +
-    `<code>${code}</code>\n\n` +
-    `<i>Open the Wise link, enter the amount, and paste the code above as the payment reference.</i>\n` +
-    `─────────────────────`
-  );
-  return sendForceReply(ctx, '✅ After paying, enter your <b>full name</b> as it appears on your Wise account:');
-}
-
-// ── Bank transfer instructions card ───────────────────────────────────────────
-async function sendBankCard(ctx, session) {
-  const mat  = session.selectedMaterial;
-  const iban = process.env.WISE_IBAN           || 'GB00 WISE 0000 0000 0000 00';
-  const bic  = process.env.WISE_BIC            || 'TRWIGB2L';
-  const name = process.env.WISE_ACCOUNT_HOLDER || 'Account Holder';
-  const code = session.promoCode;
-  await sendHTML(ctx,
-    `🏦 <b>Bank Transfer Details</b>\n` +
-    `─────────────────────\n` +
-    `👤 <b>Account Holder:</b> ${h(name)}\n` +
-    `🏛 <b>Bank:</b> Wise (TransferWise)\n` +
-    `💳 <b>IBAN:</b> <code>${h(iban)}</code>\n` +
-    `🔀 <b>BIC/SWIFT:</b> <code>${h(bic)}</code>\n` +
-    `💰 <b>Amount:</b> $${h(String(mat.price))} USD\n\n` +
-    `📌 <b>Payment reference — use this exact code:</b>\n` +
-    `<code>${code}</code>\n\n` +
-    `<i>Include the promo code as the reference so your payment is matched to your order.</i>\n` +
-    `─────────────────────`
-  );
-  return sendForceReply(ctx, '✅ After transferring, enter your <b>full name</b> as it appears on your bank account:');
-}
-
-// ── Process confirmed payment, save to DB, deliver file ───────────────────────
-async function processPaymentAndDeliver(ctx, session, userId) {
-  await sendHTML(ctx, '⏳ <b>Processing...</b>');
-  try {
-    const { submitPaymentDetails, confirmPayment, markFileDelivered } =
-      await import('../services/payment.service.js');
-
-    await submitPaymentDetails(session.promoCode, {
-      method:         session.paymentMethod,
-      senderName:     session.senderName,
-      senderEmail:    session.senderEmail,
-      transactionRef: session.transactionRef,
-    });
-
-    const { purchase, material } = await confirmPayment(session.promoCode, 'user_submitted');
-
-    await sendHTML(ctx,
-      `✅ <b>Payment confirmed!</b>\n\n` +
-      `📦 ${h(material.title)}\n` +
-      `🎟 Code: <code>${session.promoCode}</code>\n` +
-      `🔖 Ref: <code>${h(session.transactionRef)}</code>\n\n` +
-      `📥 <b>Sending your file now...</b>`
-    );
-
-    await sendMaterialFile(ctx, material);
-    await markFileDelivered(session.promoCode);
-
-    audit(userId, 'purchase_verified', {
-      promoCode: session.promoCode,
-      material:  material.title,
-      method:    session.paymentMethod,
-      ref:       session.transactionRef,
-    });
-    audit(userId, 'purchase_delivered', {
-      promoCode: session.promoCode,
-      material:  material.title,
-    });
-
-    logger.info('[Purchase] Complete', {
-      purchaseId: purchase._id,
-      code:       session.promoCode,
-      user:       ctx.from.id,
-      material:   material.title,
-    });
-
-  } catch (err) {
-    logger.error('[Purchase] Error:', err);
-    audit(userId, 'purchase_error', {
-      stage:     'payment_delivery',
-      promoCode: session.promoCode,
-      err:       err.message,
-    });
-    await sendHTML(ctx,
-      `⚠️ <b>Payment saved, but file delivery failed.</b>\n\n` +
-      `Your promo code is <code>${session.promoCode}</code>.\n` +
-      `Contact support with this code and we will send your file manually.`
-    );
-  }
-  userSessions.delete(userId);
-}
+// ── File delivery is now handled by payment_routes.js after Flutterwave verifies ──
+// The bot's role ends at sending the payment link. The Express route
+// POST /api/payment/verify calls deliverFileTelegram() which sends the PDF.
 
 // ── Materials list ─────────────────────────────────────────────────────────────
 async function displayNCLEXMaterials(ctx, materials, category) {
@@ -1081,13 +879,21 @@ async function continueFromSession(ctx, session) {
       if (session.step === 'material_selection') {
         return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      if (['method_selection','name','email','ref','confirming'].includes(session.step)) {
-        // Re-show the order card so user can see their code and continue
-        const mat = session.selectedMaterial;
+      if (session.step === 'awaiting_payment') {
+        // Re-show the payment link so user can complete payment
+        const mat          = session.selectedMaterial;
+        const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const paymentUrl   = `${frontendBase}/pay?code=${session.promoCode}`;
+        const isLocalhost  = frontendBase.includes('localhost') || frontendBase.includes('127.0.0.1');
         return sendHTML(ctx,
           `🛒 Continuing your order: <b>${h(mat.title)}</b>\n` +
           `🎟 Code: <code>${session.promoCode}</code>\n\n` +
-          `Type <b>back</b> to restart, or continue where you left off.`
+          (isLocalhost
+            ? `Open this link to pay:\n<a href="${paymentUrl}">${paymentUrl}</a>`
+            : `Tap below to complete your payment.`),
+          isLocalhost ? {} : {
+            reply_markup: { inline_keyboard: [[{ text: '💳 Complete Payment', url: paymentUrl }]] }
+          }
         );
       }
       break;
