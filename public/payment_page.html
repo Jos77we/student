@@ -45,7 +45,7 @@
       box-shadow: 0 4px 24px rgba(0,0,0,0.07);
     }
 
-    /* ── Loading skeleton ── */
+    /* Loading skeleton */
     #loading-state { text-align: center; padding: 20px 0; }
     .spinner {
       width: 40px; height: 40px;
@@ -57,7 +57,7 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Order summary ── */
+    /* Order summary */
     #order-state { display: none; }
     .order-title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 16px; }
 
@@ -98,7 +98,7 @@
       font-size: 0.75rem; padding: 3px 8px; border-radius: 20px;
     }
 
-    /* ── Email field ── */
+    /* Email field */
     .email-section { margin: 20px 0 0; }
     label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; color: var(--muted); }
     input[type="email"] {
@@ -110,7 +110,7 @@
     input[type="email"]:focus { border-color: var(--green); }
     input[type="email"].err { border-color: var(--red); }
 
-    /* ── Pay button ── */
+    /* Pay button */
     .pay-btn {
       margin-top: 20px;
       width: 100%; padding: 14px;
@@ -128,13 +128,13 @@
       font-size: 0.78rem; color: var(--muted);
     }
 
-    /* ── Success state ── */
+    /* Success state */
     #success-state { display: none; text-align: center; padding: 10px 0; }
     .success-icon { font-size: 3rem; margin-bottom: 12px; }
     .success-title { font-size: 1.2rem; font-weight: 700; color: var(--green); margin-bottom: 8px; }
     .success-sub { font-size: 0.9rem; color: var(--muted); line-height: 1.5; }
 
-    /* ── Error state ── */
+    /* Error state */
     #error-state { display: none; text-align: center; padding: 10px 0; }
     .error-icon { font-size: 2.5rem; margin-bottom: 12px; }
     .error-title { font-size: 1.1rem; font-weight: 700; color: var(--red); margin-bottom: 8px; }
@@ -146,7 +146,7 @@
       cursor: pointer;
     }
 
-    /* ── Expired / already paid ── */
+    /* Expired / already paid */
     #expired-state { display: none; text-align: center; padding: 10px 0; }
   </style>
 </head>
@@ -227,100 +227,136 @@
   </div>
 
   <script>
-    // ── Read promo code from URL: ?code=XXXXXX ──────────────────────────────────
+    // These values will be injected by the backend when serving the page
+    window.FLW_PUBLIC_KEY = null;  // Will be replaced by server
+    window.API_BASE = null;         // Will be replaced by server
+    
+    // Read promo code from URL: ?code=XXXXXX
     const params    = new URLSearchParams(window.location.search);
     const promoCode = (params.get('code') || '').toUpperCase();
-
-    // Flutterwave public key — injected from env at build/serve time via meta tag,
-    // or hard-code for local testing. DO NOT put secret key here.
-    // Replace the value below with your actual Flutterwave PUBLIC key.
-    const FLW_PUBLIC_KEY = window.FLW_PUBLIC_KEY || 'YOUR_FLUTTERWAVE_PUBLIC_KEY_HERE';
-
-    // Backend base URL — same origin by default
-    const API_BASE = window.API_BASE || '';
-
+    
     let orderData = null;
 
-    // ── Show / hide helpers ─────────────────────────────────────────────────────
-    function show(id)  { document.getElementById(id).style.display = 'block'; }
-    function hide(id)  { document.getElementById(id).style.display = 'none'; }
+    // Show / hide helpers
+    function show(id)  { 
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'block';
+    }
+    function hide(id)  { 
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    }
     function showOnly(id) {
-      ['loading-state','order-state','success-state','error-state','expired-state']
-        .forEach(s => s === id ? show(s) : hide(s));
+      const states = ['loading-state','order-state','success-state','error-state','expired-state'];
+      states.forEach(s => {
+        if (s === id) show(s);
+        else hide(s);
+      });
     }
 
-    // ── Load order from backend ─────────────────────────────────────────────────
+    // Load order from backend
     async function loadOrder() {
       if (!promoCode) {
         showOnly('expired-state');
-        document.getElementById('expired-title').textContent = 'No Order Found';
-        document.getElementById('expired-sub').textContent   = 'Return to the Telegram bot and use /buy to generate a payment link.';
+        const expiredTitle = document.getElementById('expired-title');
+        const expiredSub = document.getElementById('expired-sub');
+        if (expiredTitle) expiredTitle.textContent = 'No Order Found';
+        if (expiredSub) expiredSub.textContent = 'Return to the Telegram bot and use /buy to generate a payment link.';
         return;
       }
 
       try {
-        const res  = await fetch(`${API_BASE}/api/payment/order/${promoCode}`);
+        const apiUrl = window.API_BASE ? `${window.API_BASE}/api/payment/order/${promoCode}` : `/api/payment/order/${promoCode}`;
+        const res  = await fetch(apiUrl);
         const data = await res.json();
 
         if (!data.ok) {
           showOnly('expired-state');
-          document.getElementById('expired-title').textContent = res.status === 409 ? 'Already Paid' : 'Order Unavailable';
-          document.getElementById('expired-sub').textContent   = data.error || 'This link is no longer valid.';
+          const expiredTitle = document.getElementById('expired-title');
+          const expiredSub = document.getElementById('expired-sub');
+          if (expiredTitle) expiredTitle.textContent = res.status === 409 ? 'Already Paid' : 'Order Unavailable';
+          if (expiredSub) expiredSub.textContent = data.error || 'This link is no longer valid.';
           return;
         }
 
         orderData = data.order;
 
         // Fill in the UI
-        document.getElementById('mat-title').textContent    = orderData.materialTitle;
-        document.getElementById('mat-category').textContent = orderData.category;
-        document.getElementById('promo-code').textContent   = orderData.promoCode;
-        document.getElementById('mat-price').textContent    = `$${orderData.amountUSD} USD`;
+        const matTitle = document.getElementById('mat-title');
+        const matCategory = document.getElementById('mat-category');
+        const promoCodeSpan = document.getElementById('promo-code');
+        const matPrice = document.getElementById('mat-price');
+        
+        if (matTitle) matTitle.textContent = orderData.materialTitle;
+        if (matCategory) matCategory.textContent = orderData.category;
+        if (promoCodeSpan) promoCodeSpan.textContent = orderData.promoCode;
+        if (matPrice) matPrice.textContent = `$${orderData.amountUSD} USD`;
 
         const topicsEl = document.getElementById('mat-topics');
-        (orderData.topics || []).slice(0, 4).forEach(t => {
-          const tag = document.createElement('span');
-          tag.className   = 'topic-tag';
-          tag.textContent = t;
-          topicsEl.appendChild(tag);
-        });
-        if (!(orderData.topics || []).length) {
-          document.getElementById('topics-row').style.display = 'none';
+        if (topicsEl) {
+          (orderData.topics || []).slice(0, 4).forEach(t => {
+            const tag = document.createElement('span');
+            tag.className   = 'topic-tag';
+            tag.textContent = t;
+            topicsEl.appendChild(tag);
+          });
+          if (!(orderData.topics || []).length) {
+            const topicsRow = document.getElementById('topics-row');
+            if (topicsRow) topicsRow.style.display = 'none';
+          }
         }
 
         showOnly('order-state');
       } catch (err) {
+        console.error('Load order error:', err);
         showOnly('error-state');
-        document.getElementById('error-title').textContent = 'Could not load order';
-        document.getElementById('error-sub').textContent   = 'Check your connection and try again.';
+        const errorTitle = document.getElementById('error-title');
+        const errorSub = document.getElementById('error-sub');
+        if (errorTitle) errorTitle.textContent = 'Could not load order';
+        if (errorSub) errorSub.textContent = 'Check your connection and try again.';
       }
     }
 
-    // ── Launch Flutterwave modal ─────────────────────────────────────────────────
+    // Launch Flutterwave modal
     function launchFlutterwave() {
       const emailInput = document.getElementById('buyer-email');
-      const email      = emailInput.value.trim();
+      const email      = emailInput ? emailInput.value.trim() : '';
 
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        emailInput.classList.add('err');
-        emailInput.focus();
+        if (emailInput) {
+          emailInput.classList.add('err');
+          emailInput.focus();
+        }
         return;
       }
-      emailInput.classList.remove('err');
-      document.getElementById('pay-btn').disabled = true;
+      if (emailInput) emailInput.classList.remove('err');
+      
+      const payBtn = document.getElementById('pay-btn');
+      if (payBtn) payBtn.disabled = true;
 
       // tx_ref format: NCLEX-<promoCode>-<timestamp>
-      // The webhook extracts the promoCode from this
       const txRef = `NCLEX-${promoCode}-${Date.now()}`;
 
+      // Check if Flutterwave is loaded
+      if (typeof FlutterwaveCheckout === 'undefined') {
+        console.error('Flutterwave not loaded');
+        if (payBtn) payBtn.disabled = false;
+        showOnly('error-state');
+        const errorTitle = document.getElementById('error-title');
+        const errorSub = document.getElementById('error-sub');
+        if (errorTitle) errorTitle.textContent = 'Payment Gateway Error';
+        if (errorSub) errorSub.textContent = 'Please refresh the page and try again.';
+        return;
+      }
+
       FlutterwaveCheckout({
-        public_key:   FLW_PUBLIC_KEY,
+        public_key:   window.FLW_PUBLIC_KEY,
         tx_ref:       txRef,
         amount:       orderData.amountUSD,
         currency:     orderData.currency || 'USD',
         payment_options: 'card, mobilemoneyghana, mpesa, ussd, banktransfer',
         customer: {
-          email,
+          email: email,
           name:  email.split('@')[0],
         },
         meta: {
@@ -329,33 +365,37 @@
         customizations: {
           title:       'NCLEX Prep Bot',
           description: orderData.materialTitle,
-          logo:        'https://i.imgur.com/o8qU0gJ.png', // replace with your logo URL
+          logo:        'https://i.imgur.com/o8qU0gJ.png',
         },
         callback: async function(response) {
-          // Called by Flutterwave when payment completes (success or failure)
+          // Called by Flutterwave when payment completes
           if (response.status === 'successful' || response.status === 'completed') {
             await verifyPayment(response.transaction_id, response.tx_ref);
           } else {
-            document.getElementById('pay-btn').disabled = false;
+            if (payBtn) payBtn.disabled = false;
             showOnly('error-state');
-            document.getElementById('error-title').textContent = 'Payment Cancelled';
-            document.getElementById('error-sub').textContent   = 'Your payment was not completed. You can try again.';
+            const errorTitle = document.getElementById('error-title');
+            const errorSub = document.getElementById('error-sub');
+            if (errorTitle) errorTitle.textContent = 'Payment Cancelled';
+            if (errorSub) errorSub.textContent = 'Your payment was not completed. You can try again.';
           }
         },
         onclose: function() {
           // Re-enable button if user closes modal without paying
-          document.getElementById('pay-btn').disabled = false;
+          if (payBtn) payBtn.disabled = false;
         },
       });
     }
 
-    // ── Verify payment with our backend ─────────────────────────────────────────
+    // Verify payment with backend
     async function verifyPayment(transactionId, txRef) {
       showOnly('loading-state');
-      document.getElementById('loading-state').querySelector('p').textContent = 'Verifying payment…';
+      const loadingText = document.querySelector('#loading-state p');
+      if (loadingText) loadingText.textContent = 'Verifying payment…';
 
       try {
-        const res  = await fetch(`${API_BASE}/api/payment/verify`, {
+        const apiUrl = window.API_BASE ? `${window.API_BASE}/api/payment/verify` : '/api/payment/verify';
+        const res  = await fetch(apiUrl, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ transactionId, txRef, promoCode }),
@@ -366,19 +406,22 @@
           showOnly('success-state');
         } else {
           showOnly('error-state');
-          document.getElementById('error-title').textContent = 'Verification Failed';
-          document.getElementById('error-sub').textContent   =
-            data.error || 'Payment went through but we could not verify it. Contact support with code: ' + promoCode;
+          const errorTitle = document.getElementById('error-title');
+          const errorSub = document.getElementById('error-sub');
+          if (errorTitle) errorTitle.textContent = 'Verification Failed';
+          if (errorSub) errorSub.textContent = data.error || 'Payment went through but we could not verify it. Contact support with code: ' + promoCode;
         }
       } catch (err) {
+        console.error('Verification error:', err);
         showOnly('error-state');
-        document.getElementById('error-title').textContent = 'Network Error';
-        document.getElementById('error-sub').textContent   =
-          'Payment may have gone through. Contact support with your promo code: ' + promoCode;
+        const errorTitle = document.getElementById('error-title');
+        const errorSub = document.getElementById('error-sub');
+        if (errorTitle) errorTitle.textContent = 'Network Error';
+        if (errorSub) errorSub.textContent = 'Payment may have gone through. Contact support with your promo code: ' + promoCode;
       }
     }
 
-    // ── Kick off ──────────────────────────────────────────────────────────────
+    // Start the app
     loadOrder();
   </script>
 </body>

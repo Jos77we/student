@@ -44,8 +44,26 @@ app.use('/api/payment/webhook',
 );
 
 // Serve payment page at /pay?code=XXXXXX
+import fs from 'fs'; // Add this at the top with other imports
+
+// Replace your existing payment route with this:
 app.get('/payment', (req, res) => {
-  res.sendFile(path.join(publicDir, 'payment_page.html'));
+  try {
+    const htmlPath = path.join(publicDir, 'payment_page.html');
+    let html = fs.readFileSync(htmlPath, 'utf8');
+    
+    // Inject environment variables
+    const flwPublicKey = process.env.FLW_PUBLIC_KEY || '';
+    const serverOrigin = process.env.SERVER_ORIGIN || `http://${req.get('host')}`;
+    
+    html = html.replace('window.FLW_PUBLIC_KEY = null;', `window.FLW_PUBLIC_KEY = '${flwPublicKey}';`);
+    html = html.replace('window.API_BASE = null;', `window.API_BASE = '${serverOrigin}';`);
+    
+    res.send(html);
+  } catch (err) {
+    logger.error('Failed to serve payment page:', err);
+    res.status(500).send('Payment page unavailable');
+  }
 });
 
 // ─── JSON body parser for all other routes ────────────────────────────────────
