@@ -22,11 +22,26 @@ export const bot = new Telegraf(config.TELEGRAM_TOKEN || '');
 
 function escapeMd(text) {
   if (!text) return '';
-  return String(text).replace(/[_*`[]/g, '\\$&');
+  return String(text).replace(/[_*`[\]]/g, '\\$&');
 }
 
 // ─── Shared session store ──────────────────────────────────────────────────────
 const userSessions = new Map();
+
+// ─── Helper to get public URL for payment links ────────────────────────────────
+function getPublicUrl() {
+  // Priority: 1. Environment variable, 2. NPort tunnel, 3. Localhost fallback
+  if (process.env.SERVER_ORIGIN && !process.env.SERVER_ORIGIN.includes('localhost')) {
+    return process.env.SERVER_ORIGIN;
+  }
+  
+  if (process.env.NPORT_SUBDOMAIN) {
+    return `https://${process.env.NPORT_SUBDOMAIN}.nport.link`;
+  }
+  
+  // Fallback for development
+  return 'http://localhost:3000';
+}
 
 // ─── Middleware: upsert user ───────────────────────────────────────────────────
 bot.use(async (ctx, next) => {
@@ -143,7 +158,6 @@ bot.on('callback_query', async (ctx) => {
   const userId = String(ctx.from.id);
 
   // ── Payment method selection buttons ─────────────────────────────────────
-  // ── pay_confirm button ────────────────────────────────────────────────────
   if (data === 'pay_confirm') {
     const session = userSessions.get(userId);
     if (!session || session.state !== 'nclex_purchase') {
@@ -170,7 +184,7 @@ bot.on('callback_query', async (ctx) => {
       return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
     }
 
-    return; // other choices handled by frontend
+    return;
   }
 
   if (!data.startsWith('quiz_answer:')) return ctx.answerCbQuery();
@@ -249,14 +263,11 @@ bot.on('text', async (ctx) => {
   }
 
   // ── Mid-quiz interject: user typed something while quiz is active ──────────
-  // The inline buttons handle actual A/B/C/D answers, so any TEXT message
-  // during the quiz is treated as a side question — answer it, then resume.
   if (session?.state === 'quiz_active') {
     return handleQuizInterject(ctx, session, text);
   }
 
   // While next question is generating, queue the text as a pending interject
-  // so it isn't lost — we'll answer it right after the question is sent.
   if (session?.state === 'quiz_next_loading') {
     session.pendingInterject = text;
     userSessions.set(userId, session);
@@ -272,10 +283,6 @@ bot.on('text', async (ctx) => {
   if (session?.state === 'nclex_purchase') {
     return handleNCLEXPurchaseFlow(ctx, session, text);
   }
-  if (session?.state === 'awaiting_material_selection') {
-    return handleMaterialSelection(ctx, session, text);
-  }
-  // (awaiting_download state no longer used — payment flow handles delivery)
 
   // Clear completed sessions
   if (session?.state === 'completed') userSessions.delete(userId);
@@ -323,22 +330,17 @@ bot.on('text', async (ctx) => {
 async function handleQuizTopicInput(ctx, userInput) {
   const userId = String(ctx.from.id);
 
-  // Extract one or more topics from the user's message
   let topics;
   try { topics = await extractTopicsSmart(userInput); }
   catch (_) { topics = [userInput.trim()]; }
 
-  // Remove empty/duplicate entries
   topics = [...new Set(topics.filter(t => t && t.length > 1))];
   if (topics.length === 0) topics = [userInput.trim()];
 
-  // Build a 15-slot schedule: each slot says which topic to use
   const schedule = buildTopicSchedule(topics, 15);
 
-  // Lock session
   userSessions.set(userId, { state: 'quiz_loading' });
 
-  // Friendly start message — list topics if multiple
   const topicDisplay = topics.length === 1
     ? `*${escapeMd(topics[0])}*`
     : topics.map((t, i) => `${i+1}. ${escapeMd(t)}`).join('\n');
@@ -352,7 +354,6 @@ async function handleQuizTopicInput(ctx, userInput) {
   try {
     await checkOllama();
 
-    // Fetch context for each unique topic, merge snippets
     const contextMap = {};
     for (const t of topics) {
       if (!contextMap[t]) {
@@ -362,15 +363,14 @@ async function handleQuizTopicInput(ctx, userInput) {
       }
     }
 
-    // Generate Q1 using the first slot's topic
     const firstTopic = schedule[0];
     const q1 = await generateSingleQuestion(firstTopic, 1, contextMap[firstTopic]?.context || '');
 
     userSessions.set(userId, {
       state:      'quiz_active',
-      topics,           // full array of topics
-      schedule,         // 15-element array, one topic per question slot
-      contextMap,       // topic → { context, titles }
+      topics,
+      schedule,
+      contextMap,
       questions:  [q1],
       answered:   {},
       score:      0,
@@ -393,16 +393,9 @@ async function handleQuizTopicInput(ctx, userInput) {
 }
 
 // ─── QUIZ: answer a side-question typed mid-quiz ──────────────────────────────
-/**
- * Called when a user types text while quiz_active.
- * We answer their question using Ollama (NCLEX scope), then remind them
- * the quiz is waiting. The current unanswered question stays in the chat —
- * they can tap A/B/C/D whenever they're ready.
- */
 async function handleQuizInterject(ctx, session, userText) {
   const userId = String(ctx.from.id);
 
-  // Signal we're answering so a second rapid message doesn't double-trigger
   session.state = 'quiz_interject';
   userSessions.set(userId, session);
 
@@ -410,12 +403,10 @@ async function handleQuizInterject(ctx, session, userText) {
     audit(userId, 'interject_question', { question: userText.slice(0, 200), quizTopic: session.topic || session.topics?.[0] });
     await ctx.replyWithMarkdown(`💬 _Answering your question — quiz will resume after..._`);
 
-    // Ask Ollama for an academic NCLEX-scoped answer
     const answer = await getNCLEXInterjectAnswer(userText, session.topic);
     await ctx.replyWithMarkdown(answer);
     audit(userId, 'interject_answered', { question: userText.slice(0, 100) });
 
-    // Remind them the quiz is still waiting
     const answeredCount  = Object.keys(session.answered).length;
     const remaining      = 15 - answeredCount;
     await ctx.replyWithMarkdown(
@@ -427,20 +418,14 @@ async function handleQuizInterject(ctx, session, userText) {
     logger.error('[Quiz Interject] error:', err);
     await ctx.reply('⚠️ Could not answer that right now. Tap A/B/C/D to continue your quiz.');
   } finally {
-    // Always restore quiz_active so the inline buttons keep working
     session.state = 'quiz_active';
     userSessions.set(userId, session);
   }
 }
 
-/**
- * Calls Ollama with a focused prompt: answer the question academically
- * within NCLEX scope, keep it concise (no waffle).
- */
 async function getNCLEXInterjectAnswer(question, quizTopic) {
   const { callOllama } = await import('../services/ai.service.js').catch(() => ({ callOllama: null }));
 
-  // Build a tight academic prompt
   const prompt =
     `You are an expert NCLEX nursing tutor. A student asked this question while practising ` +
     `on the topic "${quizTopic}":\n\n` +
@@ -449,7 +434,6 @@ async function getNCLEXInterjectAnswer(question, quizTopic) {
     `Use proper nursing terminology. Max 4 short paragraphs. ` +
     `If the question is unrelated to nursing or NCLEX, politely redirect them.`;
 
-  // Use callOllama from ai_service if available, otherwise inline stream
   if (callOllama) {
     try {
       const text = await callOllama(prompt, { num_predict: 500, temperature: 0.4 });
@@ -459,13 +443,12 @@ async function getNCLEXInterjectAnswer(question, quizTopic) {
     }
   }
 
-  // Fallback: use the same ollamaStream pattern from quiz_service
   try {
     const fetch  = (await import('node-fetch')).default;
     const OLLAMA_BASE  = process.env.OLLAMA_URL   || 'http://localhost:11434';
     const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2:3b';
     const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 60_000);
+    const timer = setTimeout(() => ctrl.abort(), 60000);
 
     const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
       method: 'POST', signal: ctrl.signal,
@@ -510,7 +493,6 @@ async function generateAndSendNext(ctx, userId, nextIndex) {
   const chatId = ctx.chat?.id || ctx.callbackQuery?.message?.chat?.id;
 
   try {
-    // Pick the topic for this slot from the schedule
     const schedule     = session.schedule || Array(15).fill(session.topics?.[0] || session.topic || 'NCLEX');
     const topicForSlot = schedule[nextIndex] || schedule[schedule.length - 1];
     const ctxSnip      = session.contextMap?.[topicForSlot]?.context || session.ctxSnip || '';
@@ -523,7 +505,6 @@ async function generateAndSendNext(ctx, userId, nextIndex) {
     await sendQuestionMessage(ctx, q, nextIndex);
     audit(userId, 'quiz_question_sent', { qNum: nextIndex + 1, topic: topicForSlot });
 
-    // Flush any queued interject
     const pending = session.pendingInterject;
     if (pending) {
       session.pendingInterject = null;
@@ -589,14 +570,12 @@ async function sendFinalScore(ctx, userId) {
   else if (pct >= 55) feedback = `📚 Fair attempt. Review these topics and try again.`;
   else                feedback = `💪 Keep studying! Use /buy for targeted study materials.`;
 
-  // Build topic line — single vs multiple
   const topics   = session.topics || (session.topic ? [session.topic] : ['NCLEX']);
   const schedule = session.schedule || Array(total).fill(topics[0]);
 
   let topicLine = `🎯 *Topic:* ${escapeMd(topics[0])}`;
 
   if (topics.length > 1) {
-    // Per-topic score breakdown
     const topicScores = {};
     const topicTotals = {};
     for (const t of topics) { topicScores[t] = 0; topicTotals[t] = 0; }
@@ -649,7 +628,6 @@ async function sendFinalScore(ctx, userId) {
   userSessions.delete(userId);
 }
 
-// ─── QUIZ: user-friendly error message ────────────────────────────────────────
 function quizErrorMessage(err) {
   let reason = 'Something went wrong. Please type /quiz to try again.';
   if (err.message?.includes('ollama serve') || err.message?.includes('ECONNREFUSED')) {
@@ -663,7 +641,6 @@ function quizErrorMessage(err) {
   }
   return `❌ *Quiz failed to start.*\n\n${reason}`;
 }
-
 
 // ─── HTML helper — safe for any user data or material titles ──────────────────
 function h(text) {
@@ -679,38 +656,9 @@ function sendHTML(ctx, text, extra = {}) {
 }
 
 // ─── PURCHASE FLOW ─────────────────────────────────────────────────────────────
-// All messages use HTML — immune to Telegram Markdown parse errors.
-// Steps: category_selection → material_selection → payment_card
-//        → awaiting_name → awaiting_email → awaiting_ref → confirming
-// ──────────────────────────────────────────────────────────────────────────────
-// ─── PURCHASE FLOW ─────────────────────────────────────────────────────────────
-// Uses native Telegram features only:
-//   • HTML messages     — no Markdown parse errors
-//   • Inline keyboards  — buttons for method selection and confirm
-//   • ForceReply        — makes chat look like a form field at each step
-//
-// Steps:  category_selection → material_selection → method_selection
-//         → name → email → ref → confirming
-//
-// ForceReply prompts look like this in the chat:
-//   ┌─────────────────────────────┐
-//   │ Reply to: Enter your name   │ ← quoted prompt (greyed out)
-//   └─────────────────────────────┘
-//   [                           ] ← keyboard auto-opens
-// ──────────────────────────────────────────────────────────────────────────────
-
-// Utility: send a ForceReply prompt
-// The user sees the promptText as a quoted reply they must respond to.
-function sendForceReply(ctx, promptText) {
-  return sendHTML(ctx, promptText, {
-    reply_markup: { force_reply: true, input_field_placeholder: '' },
-  });
-}
-
 async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
   const userId = String(ctx.from.id);
 
-  // ── "back" at any step ─────────────────────────────────────────────────
   if (userInput.toLowerCase() === 'back') {
     if (session.step === 'material_selection') {
       session.step = 'category_selection'; session.currentCategory = null;
@@ -723,7 +671,7 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         '4. Physiological Integrity'
       );
     }
-    if (['method_selection','name','email','ref','confirming'].includes(session.step)) {
+    if (['awaiting_payment'].includes(session.step)) {
       session.step = 'material_selection';
       userSessions.set(userId, session);
       return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
@@ -732,7 +680,6 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
 
   switch (session.step) {
 
-    // ── 1. Category ──────────────────────────────────────────────────────
     case 'category_selection': {
       const catMap = {
         '1': 'Safe and Effective Care Environment',
@@ -765,79 +712,59 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
       return displayNCLEXMaterials(ctx, materials, selected);
     }
 
-    // ── 2. Material selection ────────────────────────────────────────────
     case 'material_selection': {
-  const num = parseInt(userInput.trim());
-  if (isNaN(num) || num < 1 || num > session.materials.length) {
-    return sendHTML(ctx, `❌ Reply with a number between 1 and ${session.materials.length}.`);
-  }
-  const mat = session.materials[num - 1];
-  session.selectedMaterial = mat;
+      const num = parseInt(userInput.trim());
+      if (isNaN(num) || num < 1 || num > session.materials.length) {
+        return sendHTML(ctx, `❌ Reply with a number between 1 and ${session.materials.length}.`);
+      }
+      
+      const mat = session.materials[num - 1];
+      session.selectedMaterial = mat;
 
-  // Issue promo code
-  try {
-    const { issuePromoCode } = await import('../services/payment.service.js');
-    const promo = await issuePromoCode(ctx.dbUser, mat);
-    session.promoCode = promo.code;
-  } catch (e) {
-    logger.error('[Buy] issuePromoCode failed:', e);
-    session.promoCode = Math.floor(100000 + Math.random() * 900000).toString();
-  }
+      try {
+        const { issuePromoCode } = await import('../services/payment.service.js');
+        const promo = await issuePromoCode(ctx.dbUser, mat);
+        session.promoCode = promo.code;
+        logger.info('[Payment] Promo code issued:', { code: promo.code, material: mat.title });
+      } catch (e) {
+        logger.error('[Buy] issuePromoCode failed:', e);
+        session.promoCode = Math.floor(100000 + Math.random() * 900000).toString();
+      }
 
-  session.step = 'awaiting_payment';
-  userSessions.set(userId, session);
+      session.step = 'awaiting_payment';
+      userSessions.set(userId, session);
 
-  const price = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
-  const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
-  
-  // IMPORTANT: Get the server URL from env
-  const serverOrigin = process.env.SERVER_ORIGIN;
-  
-  // FALLBACK: If SERVER_ORIGIN isn't set, show a helpful error
-  if (!serverOrigin) {
-    await sendHTML(ctx, 
-      `⚠️ <b>Configuration Error</b>\n\n` +
-      `SERVER_ORIGIN is not set in .env file.\n\n` +
-      `Please add:\n` +
-      `<code>SERVER_ORIGIN=http://YOUR_SERVER_IP:3000</code>\n\n` +
-      `Then restart the bot.`
-    );
-    return;
-  }
-  
-  const paymentUrl = `${serverOrigin}/payment?code=${session.promoCode}`;
+      const price = mat.price === 'Free' ? 'Free' : `$${mat.price} USD`;
+      const topics = (mat.topics || []).slice(0, 3).map(t => h(t)).join(', ') || 'General';
+      
+      // Get the public URL for payment link
+      const serverOrigin = getPublicUrl();
+      const paymentUrl = `${serverOrigin}/payment?code=${session.promoCode}`;
+      
+      logger.info('[Payment] Payment URL:', paymentUrl);
 
-  const msgText = 
-    `✅ <b>Purchase Confirmation</b>\n\n` +
-    `📦 <b>Material:</b> ${h(mat.title)}\n` +
-    `📚 <b>Category:</b> ${h(mat.category)}\n` +
-    `🎯 <b>Topics:</b> ${topics}\n` +
-    `💰 <b>Price:</b> ${price}\n` +
-    `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
-    `👇 <b>Tap the button below to complete payment</b>`;
+      const msgText = 
+        `✅ <b>Purchase Confirmation</b>\n\n` +
+        `📦 <b>Material:</b> ${h(mat.title)}\n` +
+        `📚 <b>Category:</b> ${h(mat.category)}\n` +
+        `🎯 <b>Topics:</b> ${topics}\n` +
+        `💰 <b>Price:</b> ${price}\n` +
+        `🎟 <b>Promo Code:</b> <code>${session.promoCode}</code>\n\n` +
+        `👇 <b>Tap the button below to complete payment</b>`;
 
-  // Send message WITH the button
-  await ctx.telegram.sendMessage(ctx.chat.id, msgText, {
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '💳 Pay Now', url: paymentUrl }],
-        [{ text: '← Back to materials', callback_data: 'pay_method:back' }]
-      ]
+      await ctx.telegram.sendMessage(ctx.chat.id, msgText, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💳 Pay Now', url: paymentUrl }],
+            [{ text: '← Back to materials', callback_data: 'pay_method:back' }]
+          ]
+        }
+      });
+      
+      return;
     }
-  });
-  
-  // Log for debugging
-  logger.info('[Payment] Sent payment button', { 
-    userId, 
-    promoCode: session.promoCode, 
-    url: paymentUrl 
-  });
-  
-  return;
-}
 
-    // Awaiting payment — user has the link, remind them or allow back
     case 'awaiting_payment': {
       const low = userInput.toLowerCase();
       if (low === 'back') {
@@ -845,8 +772,10 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
         userSessions.set(userId, session);
         return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      const serverOrigin = process.env.SERVER_ORIGIN || 'http://localhost:3000';
-      const paymentUrl   = `${serverOrigin}/payment?code=${session.promoCode}`;
+      
+      const serverOrigin = getPublicUrl();
+      const paymentUrl = `${serverOrigin}/payment?code=${session.promoCode}`;
+      
       return sendHTML(ctx,
         `💳 Tap the button to complete your Flutterwave payment, or type <b>back</b> to choose a different material.`,
         {
@@ -862,8 +791,6 @@ async function handleNCLEXPurchaseFlow(ctx, session, userInput) {
   }
 }
 
-// ── Process confirmed payment, save to DB, deliver file ───────────────────────
-// (This remains the same, triggered after Flutterwave verification in payment_page.html)
 async function processPaymentAndDeliver(ctx, session, userId) {
   await sendHTML(ctx, '⏳ <b>Processing...</b>');
   try {
@@ -924,7 +851,6 @@ async function processPaymentAndDeliver(ctx, session, userId) {
   userSessions.delete(userId);
 }
 
-// ── Materials list ─────────────────────────────────────────────────────────────
 async function displayNCLEXMaterials(ctx, materials, category) {
   let text = `📚 <b>${h(category)}</b>\n\n`;
   materials.forEach((m, i) => {
@@ -944,7 +870,6 @@ async function sendPaymentCard() {}
 async function sendWiseInstructions() {}
 async function sendBankInstructions() {}
 
-// ── Resume from existing session ──────────────────────────────────────────────
 async function continueFromSession(ctx, session) {
   switch (session.state) {
     case 'nclex_purchase':
@@ -960,8 +885,7 @@ async function continueFromSession(ctx, session) {
       if (session.step === 'material_selection') {
         return displayNCLEXMaterials(ctx, session.materials, session.currentCategory);
       }
-      if (['method_selection','name','email','ref','confirming'].includes(session.step)) {
-        // Re-show the order card so user can see their code and continue
+      if (['awaiting_payment'].includes(session.step)) {
         const mat = session.selectedMaterial;
         return sendHTML(ctx,
           `🛒 Continuing your order: <b>${h(mat.title)}</b>\n` +
@@ -976,7 +900,6 @@ async function continueFromSession(ctx, session) {
   return ctx.reply('Welcome back! How can I help with NCLEX prep today?');
 }
 
-// ── Stream file from GridFS and send to user ───────────────────────────────────
 async function sendMaterialFile(ctx, material) {
   try {
     const bucket = getGFSBucket();

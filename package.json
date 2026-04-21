@@ -1,12 +1,16 @@
 {
   "name": "student",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "NCLEX Telegram Bot with Flutterwave Payments",
+  "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "build": "echo 'No build step needed'"
+    "pm2-start": "pm2 start ecosystem.config.js",
+    "pm2-stop": "pm2 stop all",
+    "pm2-restart": "pm2 restart all",
+    "pm2-logs": "pm2 logs",
+    "pm2-status": "pm2 status"
   },
   "keywords": [],
   "author": "",
