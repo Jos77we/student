@@ -17,8 +17,38 @@ jobs:
           port:     22
           script: |
             cd ~/student
-            git pull origin main
-            npm install --production
-            pm2 restart nclex-bot --update-env
-
             
+            # Pull latest code
+            git pull origin main
+            
+            # Install dependencies
+            npm install --production
+            
+            # Check if PM2 is running, if not start it
+            if ! command -v pm2 &> /dev/null; then
+                npm install -g pm2 nport
+            fi
+            
+            # Get current tunnel URL before restart
+            TUNNEL_URL=$(pm2 logs nport-tunnel --lines 20 --nostream 2>/dev/null | grep -o 'https://[a-zA-Z0-9-]*\.nport\.link' | head -1)
+            
+            # Restart both processes (bot will get new code, tunnel stays same)
+            pm2 restart nport-tunnel
+            pm2 restart nclex-bot --update-env
+            
+            # If tunnel URL changed, update .env and restart bot again
+            sleep 5
+            NEW_TUNNEL_URL=$(pm2 logs nport-tunnel --lines 20 --nostream 2>/dev/null | grep -o 'https://[a-zA-Z0-9-]*\.nport\.link' | head -1)
+            
+            if [ -n "$NEW_TUNNEL_URL" ] && [ "$TUNNEL_URL" != "$NEW_TUNNEL_URL" ]; then
+                echo "Tunnel URL changed from $TUNNEL_URL to $NEW_TUNNEL_URL"
+                sed -i "s|SERVER_ORIGIN=.*|SERVER_ORIGIN=$NEW_TUNNEL_URL|" .env
+                sed -i "s|FRONTEND_URL=.*|FRONTEND_URL=$NEW_TUNNEL_URL|" .env
+                pm2 restart nclex-bot --update-env
+            fi
+            
+            # Save PM2 configuration
+            pm2 save
+            
+            # Show status
+            pm2 status
