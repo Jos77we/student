@@ -23,7 +23,10 @@ module.exports = {
       restart_delay: 5000,
       error_file: './logs/tunnel-error.log',
       out_file: './logs/tunnel-out.log',
-      time: true
+      time: true,
+      env: {
+        NPORT_LANG: 'en'  // Force English language
+      }
     }
   ]
 };
